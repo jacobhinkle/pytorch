@@ -76,14 +76,7 @@ class TORCH_CUDA_CU_API IterDomainGraph {
     return producers_;
   }
 
-  const DisjointSets<IterDomain*>& siblings() const {
-    return sibling_sets_;
-  }
-
-  const VectorOfUniqueEntries<IterDomain*>& allIds() const {
-    return all_ids_;
-  }
-
+  // TODO: Seems a bit unfortunate that this isn't IterDomain local information.
   const std::unordered_set<IterDomain*>& viewRfactorIds() const {
     return view_rfactor_ids_;
   }
@@ -92,12 +85,11 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // id_map have matching inputs (if forward), or outputs (if not forward).
   // Returning true means the expressions are "the same", in terms they modify
   // matching original extents, by the same amount.
-  static bool exprsMap(
-      Expr* first,
-      Expr* second,
-      bool forward,
-      const DisjointSets<IterDomain*>& id_map);
+  bool exprsMap(Expr* first, Expr* second, bool forward, IdMappingMode mode)
+      const;
 
+  // Returns if a self mapping was detected that would invalidate assumptions of
+  // the overall lowering system.
   bool hasSelfMapping() const {
     return self_mapping_info_.has_value();
   }
@@ -111,16 +103,26 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Non-const internal only version of getNodes.
   DisjointSets<IterDomain*>& nodes(IdMappingMode mode);
 
-  // Small alias
+  // Simple alias
   void mapNodes(IterDomain* id0, IterDomain* id1, IdMappingMode mode) {
     nodes(mode).mapEntries(id0, id1);
   }
 
   void initializeId(IterDomain* id, bool is_view_rfactor_id, bool is_leaf_id);
 
-  // Checks if exprsMap then if forward will map outputs else inputs in exact
-  // and permissive map.
-  void mapThroughExpr(Expr* first, Expr* second, bool forward);
+  // Checks if expr's are considered "the same" where sameness inputs and
+  // outputs in the same position across expressions map with  provided
+  // MappingMode. If the expressions are determined the same then
+  // if forward
+  //   will map outputs
+  // else
+  //   will map inputs
+  // in the provided mode
+  void mapThroughExpr(
+      Expr* first,
+      Expr* second,
+      bool forward,
+      IdMappingMode mode);
 
   // Keeps a disjoint set entry for all IterDomain mapping mode types.
   //
@@ -130,15 +132,16 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   std::unordered_map<IdMappingMode, DisjointSets<IterDomain*>> nodes_;
 
   // Consumers and producers is not symmetric like the other sets
+  // TODO: Generalize to mapping type. Mappings between producer TV ids and
+  // consumer TV ids depend on the mapping type.
   std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
       consumers_;
   std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
       producers_;
 
-  DisjointSets<IterDomain*> sibling_sets_;
-
-  VectorOfUniqueEntries<IterDomain*> all_ids_;
-
+  // Hold a set of iter domains that are considered view rfactor ids. This
+  // identification is particularly important to understand if split operations
+  // are divisible or not.
   std::unordered_set<IterDomain*> view_rfactor_ids_;
 
   // Debug information to hold if a self mapping in a TensorView is found.
@@ -160,6 +163,8 @@ class TORCH_CUDA_CU_API ComputeAtMap {
   //! Run through disjoint sets in the LOOP map, make sure there's only one
   //! non-serial parallel type in each disjoint set, set the parallel type of
   //! all IterDomains in the disjoint set to that PType.
+  //!
+  //! TODO: Should this be moved to parallel validation?
   void validateAndPropagatePType();
 
   //! Run through disjoint sets in the LOOP map and allocate the index
@@ -179,11 +184,15 @@ class TORCH_CUDA_CU_API ComputeAtMap {
   //! Under this condition, we can pre-allocate all required index
   //!  variable integers before creating any kir::forloop, and this
   //!  would help optimizing the generated integer math for indexing.
+  //!
+  //! TODO: Should this be moved to an indexing map structure outside of
+  //! ComputeAtMap that has a ComputeAtMap reference?
   void allocateIndexVariables();
 
-  //! Returns if id0 and id1 are mapped to eachother with provided IdMappingMode
-  bool areMapped(IterDomain* id0, IterDomain* id1, IdMappingMode mode) const;
-
+  //! Simple alias to IdGraph mappings.
+  bool areMapped(IterDomain* id0, IterDomain* id1, IdMappingMode mode) const {
+    return idGraph().getNodes(mode).strictAreMapped(id0, id1);
+  }
   //! Returns an iter domain that is the maximum expanded size of all iter
   //! domains the one provided maps to. Useful for opening loops to the correct
   //! iteration size. Not guarenteed to return the same ID every call, but is

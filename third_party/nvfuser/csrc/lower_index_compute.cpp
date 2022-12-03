@@ -1271,8 +1271,11 @@ namespace {
 bool isPermissivelyMappedWithAny(IterDomain* id, const std::vector<Val*>& ids) {
   return std::any_of(ids.begin(), ids.end(), [&](Val* val) {
     return val->isA<IterDomain>() &&
-        GpuLower::current()->caMap()->areMapped(
-            id, val->as<IterDomain>(), IdMappingMode::PERMISSIVE);
+        GpuLower::current()
+            ->caMap()
+            ->idGraph()
+            .getNodes(IdMappingMode::PERMISSIVE)
+            .permissiveAreMapped(id, val->as<IterDomain>());
   });
 }
 

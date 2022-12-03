@@ -104,11 +104,11 @@ std::unordered_set<Split*> getAllDivisibleSplits(
         continue;
       }
 
-      if (IterDomainGraph::exprsMap(
+      if (ca_map->idGraph().exprsMap(
               original_view_split,
               other_id->definition(),
               false,
-              ca_map->idGraph().getNodes(IdMappingMode::EXACT))) {
+              IdMappingMode::EXACT)) {
         all_divisible_splits.emplace(other_id->definition()->as<Split>());
       }
     }

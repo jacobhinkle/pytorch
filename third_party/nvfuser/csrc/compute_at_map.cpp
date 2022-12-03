@@ -112,7 +112,7 @@ bool IterDomainGraph::exprsMap(
     Expr* first,
     Expr* second,
     bool forward,
-    const DisjointSets<IterDomain*>& id_map) {
+    IdMappingMode mode) const {
   if (first == nullptr || second == nullptr) {
     return false;
   }
@@ -158,7 +158,8 @@ bool IterDomainGraph::exprsMap(
             zipped_ids.begin(),
             zipped_ids.end(),
             [&](std::pair<IterDomain*, IterDomain*> id_pair) {
-              return !id_map.strictAreMapped(id_pair.first, id_pair.second);
+              return !getNodes(mode).permissiveAreMapped(
+                  id_pair.first, id_pair.second);
             })) {
       return false;
     }
@@ -210,12 +211,16 @@ bool IterDomainGraph::exprsMap(
 //     better, as today it will just check it's the same symbol or evaluated to
 //     the same constant. However, we know all the extents of all the
 //     IterDomain's that exact map with eachother are the same value.
-void IterDomainGraph::mapThroughExpr(Expr* first, Expr* second, bool forward) {
+void IterDomainGraph::mapThroughExpr(
+    Expr* first,
+    Expr* second,
+    bool forward,
+    IdMappingMode mode) {
   if (first == nullptr || second == nullptr) {
     return;
   }
 
-  if (!exprsMap(first, second, forward, nodes(IdMappingMode::EXACT))) {
+  if (!exprsMap(first, second, forward, mode)) {
     return;
   }
 
@@ -232,8 +237,7 @@ void IterDomainGraph::mapThroughExpr(Expr* first, Expr* second, bool forward) {
       "\nand\n",
       second->toString());
   for (auto out_i : c10::irange(first_ids.size())) {
-    mapNodes(first_ids[out_i], second_ids[out_i], IdMappingMode::EXACT);
-    mapNodes(first_ids[out_i], second_ids[out_i], IdMappingMode::PERMISSIVE);
+    mapNodes(first_ids[out_i], second_ids[out_i], mode);
   }
 }
 
@@ -428,7 +432,6 @@ void IterDomainGraph::build(Fusion* fusion) {
           for (auto id1 : disjoint_set->vector()) {
             mapNodes(id0, id1, IdMappingMode::PERMISSIVE);
             mapNodes(id0, id1, IdMappingMode::EXACT);
-            sibling_sets_.mapEntries(id0, id1);
           }
         }
 
@@ -665,7 +668,10 @@ void IterDomainGraph::build(Fusion* fusion) {
           continue;
         }
 
-        mapThroughExpr(first_expr, other_expr, prop_forward);
+        mapThroughExpr(
+            first_expr, other_expr, prop_forward, IdMappingMode::EXACT);
+        mapThroughExpr(
+            first_expr, other_expr, prop_forward, IdMappingMode::PERMISSIVE);
       }
     }
   }
@@ -715,9 +721,6 @@ void IterDomainGraph::initializeId(
   }
   consumers_[id] = {};
   producers_[id] = {};
-  sibling_sets_.initializeSet(id);
-
-  all_ids_.pushBack(id);
 
   if (is_view_rfactor_id) {
     view_rfactor_ids_.emplace(id);
@@ -856,13 +859,6 @@ Val* ComputeAtMap::getIndexVariable(
   } else {
     return loop_index_variable_map_.at(loop_set);
   }
-}
-
-bool ComputeAtMap::areMapped(
-    IterDomain* id0,
-    IterDomain* id1,
-    IdMappingMode mode) const {
-  return disjointSetOf(id0, mode)->has(id1);
 }
 
 IterDomain* ComputeAtMap::computeConcreteId(
@@ -1386,8 +1382,6 @@ std::string ComputeAtMap::toString() const {
     std::sort(producers.begin(), producers.end(), Statement::lessThan);
     ss << "  " << key->toString() << " :: " << producers.toString() << "\n";
   }
-
-  ss << "Sibling map:\n" << id_graph_.siblings().toString() << "\n";
 
   ss << "} compute at map" << std::endl;
   return ss.str();
