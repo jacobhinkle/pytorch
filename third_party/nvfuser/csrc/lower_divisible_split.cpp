@@ -90,8 +90,10 @@ std::unordered_set<Split*> getAllDivisibleSplits(
     auto concrete_id = entry.first;
     auto original_view_split = entry.second;
 
-    const auto& exact_mapped_ids =
-        ca_map->idGraph().exactNodes().getDisjointSetOf(concrete_id).vector();
+    const auto& exact_mapped_ids = ca_map->idGraph()
+                                       .getNodes(IdMappingMode::EXACT)
+                                       .getDisjointSetOf(concrete_id)
+                                       .vector();
     for (auto other_id : exact_mapped_ids) {
       if (other_id->definition() == nullptr) {
         continue;
@@ -106,7 +108,7 @@ std::unordered_set<Split*> getAllDivisibleSplits(
               original_view_split,
               other_id->definition(),
               false,
-              ca_map->idGraph().exactNodes())) {
+              ca_map->idGraph().getNodes(IdMappingMode::EXACT))) {
         all_divisible_splits.emplace(other_id->definition()->as<Split>());
       }
     }

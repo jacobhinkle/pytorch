@@ -63,24 +63,14 @@ class TORCH_CUDA_CU_API IterDomainGraph {
  public:
   IterDomainGraph(Fusion* fusion, bool allow_self_mapping = false);
 
-  const DisjointSets<IterDomain*>& permissiveNodes() const {
-    return permissive_nodes_;
-  }
-  const DisjointSets<IterDomain*>& exactNodes() const {
-    return exact_nodes_;
-  }
-  const DisjointSets<IterDomain*>& almostExactNodes() const {
-    return almost_exact_nodes_;
-  }
-  const DisjointSets<IterDomain*>& loopNodes() const {
-    return loop_nodes_;
-  }
-
+  // Returns the disjoint set according to one of the mapping mode types.
+  const DisjointSets<IterDomain*>& getNodes(IdMappingMode mode) const;
   // Consumers and producers is not symmetric like the other sets
   const std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>&
   consumers() const {
     return consumers_;
   }
+
   const std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>&
   producers() const {
     return producers_;
@@ -118,11 +108,22 @@ class TORCH_CUDA_CU_API IterDomainGraph {
  private:
   void build(Fusion* fusion);
 
+  // Non-const internal only version of getNodes.
+  DisjointSets<IterDomain*>& nodes(IdMappingMode mode);
+
   void initializeId(IterDomain* id, bool is_view_rfactor_id, bool is_leaf_id);
 
   // Checks if exprsMap then if forward will map outputs else inputs in exact
   // and permissive map.
   void mapThroughExpr(Expr* first, Expr* second, bool forward);
+
+  // Using an array here might be nice, but it seems hard to use an enum as an
+  // array key
+  // https://stackoverflow.com/questions/2102582/how-can-i-count-the-items-in-an-enum
+  //
+  // Keeps a disjoint set entry for all IterDomain mapping mode types.
+  // TODO:
+  // std::unordered_map<IdMappingMode, DisjointSets<IterDomain*> > nodes_;
 
   DisjointSets<IterDomain*> permissive_nodes_;
   DisjointSets<IterDomain*> exact_nodes_;

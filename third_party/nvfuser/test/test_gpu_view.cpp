@@ -1211,19 +1211,22 @@ TEST_F(NVFuserTest, FusionViewIdGraph_CUDA) {
 
   // Start from the exact iter domain graph of the fusion
   IterDomainGraph id_graph(&fusion);
-  auto disjoint_view_ids = id_graph.exactNodes();
+  auto disjoint_view_ids = id_graph.getNodes(IdMappingMode::EXACT);
+
+  TORCH_CHECK(id_graph.getNodes(IdMappingMode::EXACT)
+                  .strictAreMapped(tv2->axis(1), tv4->axis(1)));
+  TORCH_CHECK(id_graph.getNodes(IdMappingMode::EXACT)
+                  .strictAreMapped(tv2->axis(2), tv4->axis(2)));
 
   TORCH_CHECK(
-      id_graph.exactNodes().strictAreMapped(tv2->axis(1), tv4->axis(1)));
+      id_graph.getNodes(IdMappingMode::EXACT)
+          .strictAreMapped(tv2->getRootDomain()[1], tv12->getRootDomain()[1]));
   TORCH_CHECK(
-      id_graph.exactNodes().strictAreMapped(tv2->axis(2), tv4->axis(2)));
-
-  TORCH_CHECK(id_graph.exactNodes().strictAreMapped(
-      tv2->getRootDomain()[1], tv12->getRootDomain()[1]));
-  TORCH_CHECK(id_graph.exactNodes().strictAreMapped(
-      tv2->getRootDomain()[2], tv12->getRootDomain()[2]));
-  TORCH_CHECK(id_graph.exactNodes().strictAreMapped(
-      tv2->getRootDomain()[3], tv12->getRootDomain()[3]));
+      id_graph.getNodes(IdMappingMode::EXACT)
+          .strictAreMapped(tv2->getRootDomain()[2], tv12->getRootDomain()[2]));
+  TORCH_CHECK(
+      id_graph.getNodes(IdMappingMode::EXACT)
+          .strictAreMapped(tv2->getRootDomain()[3], tv12->getRootDomain()[3]));
 }
 
 TEST_F(NVFuserTest, FusionViewVectorize_CUDA) {

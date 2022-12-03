@@ -157,7 +157,7 @@ void HaloInfo::setRootAxisInfo(
 
 HaloInfo::HaloInfo(Fusion* fusion, std::shared_ptr<const ComputeAtMap> ca_map)
     // Make a copy of the permissive map for extent comparators
-    : permissive_map_(ca_map->idGraph().permissiveNodes()) {
+    : permissive_map_(ca_map->idGraph().getNodes(IdMappingMode::PERMISSIVE)) {
   const auto vals = fusion->usedMathVals();
   auto tvs = ir_utils::filterByType<TensorView>(vals);
 
