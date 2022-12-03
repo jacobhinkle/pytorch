@@ -232,9 +232,8 @@ void IterDomainGraph::mapThroughExpr(Expr* first, Expr* second, bool forward) {
       "\nand\n",
       second->toString());
   for (auto out_i : c10::irange(first_ids.size())) {
-    nodes(IdMappingMode::EXACT).mapEntries(first_ids[out_i], second_ids[out_i]);
-    nodes(IdMappingMode::PERMISSIVE)
-        .mapEntries(first_ids[out_i], second_ids[out_i]);
+    mapNodes(first_ids[out_i], second_ids[out_i], IdMappingMode::EXACT);
+    mapNodes(first_ids[out_i], second_ids[out_i], IdMappingMode::PERMISSIVE);
   }
 }
 
@@ -427,8 +426,8 @@ void IterDomainGraph::build(Fusion* fusion) {
           }
           auto id0 = *disjoint_set->begin();
           for (auto id1 : disjoint_set->vector()) {
-            nodes(IdMappingMode::PERMISSIVE).mapEntries(id0, id1);
-            nodes(IdMappingMode::EXACT).mapEntries(id0, id1);
+            mapNodes(id0, id1, IdMappingMode::PERMISSIVE);
+            mapNodes(id0, id1, IdMappingMode::EXACT);
             sibling_sets_.mapEntries(id0, id1);
           }
         }
@@ -438,7 +437,7 @@ void IterDomainGraph::build(Fusion* fusion) {
           auto disjoint_set = c2f_disjoint_sets.getDisjointSetOf(f_id);
           auto id0 = *(disjoint_set.begin());
           for (auto id1 : disjoint_set) {
-            nodes(IdMappingMode::LOOP).mapEntries(id0, id1);
+            mapNodes(id0, id1, IdMappingMode::LOOP);
           }
         }
       }
@@ -472,7 +471,7 @@ void IterDomainGraph::build(Fusion* fusion) {
 
         for (auto c_id : getSortedKeys(exact_c2p_map, Statement::lessThan)) {
           auto p_id = exact_c2p_map.at(c_id);
-          nodes(IdMappingMode::EXACT).mapEntries(c_id, p_id);
+          mapNodes(c_id, p_id, IdMappingMode::EXACT);
           consumers_.at(p_id).pushBack(c_id);
           producers_.at(c_id).pushBack(p_id);
 
@@ -494,7 +493,7 @@ void IterDomainGraph::build(Fusion* fusion) {
           auto& vec = dset->vector();
           for (auto i : c10::irange(vec.size())) {
             auto id1 = vec[i];
-            nodes(IdMappingMode::PERMISSIVE).mapEntries(id1, vec[0]);
+            mapNodes(id1, vec[0], IdMappingMode::PERMISSIVE);
 
             // Add the swizzle inputs to the same
             //  disjoint set as well if either c_id
@@ -508,7 +507,7 @@ void IterDomainGraph::build(Fusion* fusion) {
                 producers_.at(id2).pushBack(id1);
                 if (idIsAComputeAtLeafDomain(id1, p_tv, c_tv) &&
                     idIsALeafDomain(id2, c_tv)) {
-                  nodes(IdMappingMode::LOOP).mapEntries(id1, id2);
+                  mapNodes(id1, id2, IdMappingMode::LOOP);
                 }
               }
               if (c_ids.count(id1) && p_ids.count(id2)) {
@@ -516,7 +515,7 @@ void IterDomainGraph::build(Fusion* fusion) {
                 consumers_.at(id2).pushBack(id1);
                 if (idIsAComputeAtLeafDomain(id2, p_tv, c_tv) &&
                     idIsALeafDomain(id1, c_tv)) {
-                  nodes(IdMappingMode::LOOP).mapEntries(id1, id2);
+                  mapNodes(id1, id2, IdMappingMode::LOOP);
                 }
               }
             }
@@ -685,22 +684,18 @@ void IterDomainGraph::build(Fusion* fusion) {
     }
     if (auto merge = dynamic_cast<Merge*>(def)) {
       if (merge->inner()->extent()->isOneInt()) {
-        nodes(IdMappingMode::ALMOSTEXACT)
-            .mapEntries(merge->outer(), merge->out());
+        mapNodes(merge->outer(), merge->out(), IdMappingMode::ALMOSTEXACT);
       }
       if (merge->outer()->extent()->isOneInt()) {
-        nodes(IdMappingMode::ALMOSTEXACT)
-            .mapEntries(merge->inner(), merge->out());
+        mapNodes(merge->inner(), merge->out(), IdMappingMode::ALMOSTEXACT);
       }
     } else if (auto split = dynamic_cast<Split*>(def)) {
       if (split->factor()->isOneInt() && split->startOffset()->isZeroInt() &&
           split->stopOffset()->isZeroInt()) {
         if (split->innerSplit()) {
-          nodes(IdMappingMode::ALMOSTEXACT)
-              .mapEntries(split->in(), split->outer());
+          mapNodes(split->in(), split->outer(), IdMappingMode::ALMOSTEXACT);
         } else {
-          nodes(IdMappingMode::ALMOSTEXACT)
-              .mapEntries(split->in(), split->inner());
+          mapNodes(split->in(), split->inner(), IdMappingMode::ALMOSTEXACT);
         }
       }
     }
@@ -1625,7 +1620,7 @@ void IterDomainGraph::updateComputeWith(TensorView* compute_with_tv) {
 
     IterDomain* consumer_id = *it;
 
-    nodes(IdMappingMode::LOOP).mapEntries(id, consumer_id);
+    mapNodes(id, consumer_id, IdMappingMode::LOOP);
   }
 }
 

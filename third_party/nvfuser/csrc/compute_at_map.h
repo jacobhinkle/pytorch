@@ -111,6 +111,11 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Non-const internal only version of getNodes.
   DisjointSets<IterDomain*>& nodes(IdMappingMode mode);
 
+  // Small alias
+  void mapNodes(IterDomain* id0, IterDomain* id1, IdMappingMode mode) {
+    nodes(mode).mapEntries(id0, id1);
+  }
+
   void initializeId(IterDomain* id, bool is_view_rfactor_id, bool is_leaf_id);
 
   // Checks if exprsMap then if forward will map outputs else inputs in exact
