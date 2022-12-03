@@ -117,18 +117,12 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // and permissive map.
   void mapThroughExpr(Expr* first, Expr* second, bool forward);
 
+  // Keeps a disjoint set entry for all IterDomain mapping mode types.
+  //
   // Using an array here might be nice, but it seems hard to use an enum as an
   // array key
   // https://stackoverflow.com/questions/2102582/how-can-i-count-the-items-in-an-enum
-  //
-  // Keeps a disjoint set entry for all IterDomain mapping mode types.
-  // TODO:
-  // std::unordered_map<IdMappingMode, DisjointSets<IterDomain*> > nodes_;
-
-  DisjointSets<IterDomain*> permissive_nodes_;
-  DisjointSets<IterDomain*> exact_nodes_;
-  DisjointSets<IterDomain*> almost_exact_nodes_;
-  DisjointSets<IterDomain*> loop_nodes_;
+  std::unordered_map<IdMappingMode, DisjointSets<IterDomain*>> nodes_;
 
   // Consumers and producers is not symmetric like the other sets
   std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
@@ -142,6 +136,7 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   std::unordered_set<IterDomain*> view_rfactor_ids_;
 
+  // Debug information to hold if a self mapping in a TensorView is found.
   c10::optional<std::tuple<TensorView*, IterDomain*, IterDomain*, std::string>>
       self_mapping_info_ = c10::nullopt;
 };

@@ -39,6 +39,18 @@ bool idIsALeafDomain(IterDomain* id, TensorView* tv) {
 } // namespace
 
 IterDomainGraph::IterDomainGraph(Fusion* fusion, bool allow_self_mapping) {
+  // Initialize the required sets as if a permissive relationship is never
+  // found, then querying an empty permissive map will fail later.
+  std::vector<IdMappingMode> mapping_types{
+      IdMappingMode::EXACT,
+      IdMappingMode::ALMOSTEXACT,
+      IdMappingMode::PERMISSIVE,
+      IdMappingMode::LOOP};
+
+  for (auto mode : mapping_types) {
+    nodes_[mode] = DisjointSets<IterDomain*>();
+  }
+
   build(fusion);
 
   if (!allow_self_mapping) {
@@ -58,31 +70,17 @@ IterDomainGraph::IterDomainGraph(Fusion* fusion, bool allow_self_mapping) {
 
 const DisjointSets<IterDomain*>& IterDomainGraph::getNodes(
     IdMappingMode mode) const {
-  switch (mode) {
-    case IdMappingMode::EXACT:
-      return exact_nodes_;
-    case IdMappingMode::ALMOSTEXACT:
-      return almost_exact_nodes_;
-    case IdMappingMode::LOOP:
-      return loop_nodes_;
-    case IdMappingMode::PERMISSIVE:
-      return permissive_nodes_;
-  }
-  TORCH_INTERNAL_ASSERT(false, "Error with mapping mode provided.");
+  auto node_set_it = nodes_.find(mode);
+  TORCH_INTERNAL_ASSERT(
+      node_set_it != nodes_.end(), "Mapping mode ", mode, " not supported.");
+  return node_set_it->second;
 }
 
 DisjointSets<IterDomain*>& IterDomainGraph::nodes(IdMappingMode mode) {
-  switch (mode) {
-    case IdMappingMode::EXACT:
-      return exact_nodes_;
-    case IdMappingMode::ALMOSTEXACT:
-      return almost_exact_nodes_;
-    case IdMappingMode::LOOP:
-      return loop_nodes_;
-    case IdMappingMode::PERMISSIVE:
-      return permissive_nodes_;
-  }
-  TORCH_INTERNAL_ASSERT(false, "Error with mapping mode provided.");
+  auto node_set_it = nodes_.find(mode);
+  TORCH_INTERNAL_ASSERT(
+      node_set_it != nodes_.end(), "Mapping mode ", mode, " not supported.");
+  return node_set_it->second;
 }
 
 //! Map corresponding inputs and outputs of swizzle op together
@@ -217,7 +215,7 @@ void IterDomainGraph::mapThroughExpr(Expr* first, Expr* second, bool forward) {
     return;
   }
 
-  if (!exprsMap(first, second, forward, exact_nodes_)) {
+  if (!exprsMap(first, second, forward, nodes(IdMappingMode::EXACT))) {
     return;
   }
 
@@ -234,7 +232,7 @@ void IterDomainGraph::mapThroughExpr(Expr* first, Expr* second, bool forward) {
       "\nand\n",
       second->toString());
   for (auto out_i : c10::irange(first_ids.size())) {
-    exact_nodes_.mapEntries(first_ids[out_i], second_ids[out_i]);
+    nodes(IdMappingMode::EXACT).mapEntries(first_ids[out_i], second_ids[out_i]);
     nodes(IdMappingMode::PERMISSIVE)
         .mapEntries(first_ids[out_i], second_ids[out_i]);
   }
@@ -430,7 +428,7 @@ void IterDomainGraph::build(Fusion* fusion) {
           auto id0 = *disjoint_set->begin();
           for (auto id1 : disjoint_set->vector()) {
             nodes(IdMappingMode::PERMISSIVE).mapEntries(id0, id1);
-            exact_nodes_.mapEntries(id0, id1);
+            nodes(IdMappingMode::EXACT).mapEntries(id0, id1);
             sibling_sets_.mapEntries(id0, id1);
           }
         }
@@ -440,7 +438,7 @@ void IterDomainGraph::build(Fusion* fusion) {
           auto disjoint_set = c2f_disjoint_sets.getDisjointSetOf(f_id);
           auto id0 = *(disjoint_set.begin());
           for (auto id1 : disjoint_set) {
-            loop_nodes_.mapEntries(id0, id1);
+            nodes(IdMappingMode::LOOP).mapEntries(id0, id1);
           }
         }
       }
@@ -474,15 +472,15 @@ void IterDomainGraph::build(Fusion* fusion) {
 
         for (auto c_id : getSortedKeys(exact_c2p_map, Statement::lessThan)) {
           auto p_id = exact_c2p_map.at(c_id);
-          exact_nodes_.mapEntries(c_id, p_id);
+          nodes(IdMappingMode::EXACT).mapEntries(c_id, p_id);
           consumers_.at(p_id).pushBack(c_id);
           producers_.at(c_id).pushBack(p_id);
 
           // Add the swizzle inputs to the same
           //  disjoint set as well if either c_id
           //  or p_id is swizzle output.
-          mapMaybeSwizzleOp(exact_nodes_, p_id);
-          mapMaybeSwizzleOp(exact_nodes_, c_id);
+          mapMaybeSwizzleOp(nodes(IdMappingMode::EXACT), p_id);
+          mapMaybeSwizzleOp(nodes(IdMappingMode::EXACT), c_id);
         }
 
         auto p_ids_vec = ir_utils::allIDsOf(p_tv);
@@ -510,7 +508,7 @@ void IterDomainGraph::build(Fusion* fusion) {
                 producers_.at(id2).pushBack(id1);
                 if (idIsAComputeAtLeafDomain(id1, p_tv, c_tv) &&
                     idIsALeafDomain(id2, c_tv)) {
-                  loop_nodes_.mapEntries(id1, id2);
+                  nodes(IdMappingMode::LOOP).mapEntries(id1, id2);
                 }
               }
               if (c_ids.count(id1) && p_ids.count(id2)) {
@@ -518,7 +516,7 @@ void IterDomainGraph::build(Fusion* fusion) {
                 consumers_.at(id2).pushBack(id1);
                 if (idIsAComputeAtLeafDomain(id2, p_tv, c_tv) &&
                     idIsALeafDomain(id1, c_tv)) {
-                  loop_nodes_.mapEntries(id1, id2);
+                  nodes(IdMappingMode::LOOP).mapEntries(id1, id2);
                 }
               }
             }
@@ -637,7 +635,8 @@ void IterDomainGraph::build(Fusion* fusion) {
 
       // Only need to be concerned here with mapping across rfactor iter
       // domains, so isolate out those.
-      auto all_exact_map_ids = exact_nodes_.getDisjointSetOf(first_rfactor_id);
+      auto all_exact_map_ids =
+          nodes(IdMappingMode::EXACT).getDisjointSetOf(first_rfactor_id);
       std::vector<IterDomain*> exact_map_rf_ids;
       std::copy_if(
           all_exact_map_ids.vector().begin(),
@@ -673,9 +672,9 @@ void IterDomainGraph::build(Fusion* fusion) {
   }
 
   // Build almost exact map by forwarding through broadcast axes
-  almost_exact_nodes_ = exact_nodes_;
+  nodes(IdMappingMode::ALMOSTEXACT) = nodes(IdMappingMode::EXACT);
   std::unordered_set<Expr*> visited;
-  auto all_elements = exact_nodes_.getAllElements();
+  auto all_elements = nodes(IdMappingMode::EXACT).getAllElements();
   for (auto entry : all_elements.vector()) {
     if (entry->definition() == nullptr) {
       continue;
@@ -686,18 +685,22 @@ void IterDomainGraph::build(Fusion* fusion) {
     }
     if (auto merge = dynamic_cast<Merge*>(def)) {
       if (merge->inner()->extent()->isOneInt()) {
-        almost_exact_nodes_.mapEntries(merge->outer(), merge->out());
+        nodes(IdMappingMode::ALMOSTEXACT)
+            .mapEntries(merge->outer(), merge->out());
       }
       if (merge->outer()->extent()->isOneInt()) {
-        almost_exact_nodes_.mapEntries(merge->inner(), merge->out());
+        nodes(IdMappingMode::ALMOSTEXACT)
+            .mapEntries(merge->inner(), merge->out());
       }
     } else if (auto split = dynamic_cast<Split*>(def)) {
       if (split->factor()->isOneInt() && split->startOffset()->isZeroInt() &&
           split->stopOffset()->isZeroInt()) {
         if (split->innerSplit()) {
-          almost_exact_nodes_.mapEntries(split->in(), split->outer());
+          nodes(IdMappingMode::ALMOSTEXACT)
+              .mapEntries(split->in(), split->outer());
         } else {
-          almost_exact_nodes_.mapEntries(split->in(), split->inner());
+          nodes(IdMappingMode::ALMOSTEXACT)
+              .mapEntries(split->in(), split->inner());
         }
       }
     }
@@ -734,7 +737,6 @@ ComputeAtMap::ComputeAtMap(Fusion* fusion)
 void ComputeAtMap::build(Fusion* fusion) {
   buildUniqueExactExprMaps();
   buildConcreteIds();
-  buildUniqueExactExprMaps();
 }
 
 void ComputeAtMap::validateAndPropagatePType() {
@@ -1623,7 +1625,7 @@ void IterDomainGraph::updateComputeWith(TensorView* compute_with_tv) {
 
     IterDomain* consumer_id = *it;
 
-    loop_nodes_.mapEntries(id, consumer_id);
+    nodes(IdMappingMode::LOOP).mapEntries(id, consumer_id);
   }
 }
 
