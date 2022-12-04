@@ -100,6 +100,45 @@ class TORCH_CUDA_CU_API IterDomainGraph {
  private:
   void build(Fusion* fusion);
 
+  // ======= START Iteration domain build process in order called =======
+
+  // Initializes entries for the provided IterDomain in the overall
+  // IterDomainGraph
+  void initializeId(IterDomain* id, bool is_view_rfactor_id, bool is_leaf_id);
+
+  // Iterates over all Iter Domains in allTvs(fusion) computes
+  // is_view_rfactor_id, is_leaf_id and calls initializeID.
+  void initialIdProcessing(Fusion* fusion);
+
+  // Maps sibling TensorViews that are outputs of expr. TensorView outputs must
+  // be replayed the same as eachother, so mapping them is very straightforward.
+  void mapMultiOutput(Expr* expr);
+
+  // Fills nodes_[IdMappingMode::EXACT] for relationships between inputs and
+  // first output of expr
+  void mapExact(Expr* expr);
+
+  // Fills nodes_[IdMappingMode::PERMISSIVE] for relationships between inputs
+  // and first output of expr
+  //
+  // Currently also fills nodes_[IdMappingMode::LOOP], consumer_, and producer_
+  void mapPermissiveAndLoop(Expr* expr);
+
+  // Propagates forward then backward through all view like rfactor
+  // transformations to map cross view operations.
+  //
+  // TODO: This should be refactored to just process all IterDomain expressions
+  // between all Tv's root and rfactor domain. Although view is the only place
+  // this happens where there may be a significant perf implication. There's no
+  // reason we can't do this on all such transformations.
+  void mapRFactorExprs(Fusion* fusion);
+
+  // Initialize AlmostExact as Exact entries, then map anything that's either
+  // merged with a size-1 or split by a size-1 dimension.
+  void buildAlmostExactMap();
+
+  // ======= END Iteration domain build process in order called =======
+
   // Non-const internal only version of getNodes.
   DisjointSets<IterDomain*>& nodes(IdMappingMode mode);
 
@@ -107,8 +146,6 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   void mapNodes(IterDomain* id0, IterDomain* id1, IdMappingMode mode) {
     nodes(mode).mapEntries(id0, id1);
   }
-
-  void initializeId(IterDomain* id, bool is_view_rfactor_id, bool is_leaf_id);
 
   // Checks if expr's are considered "the same" where sameness inputs and
   // outputs in the same position across expressions map with  provided
