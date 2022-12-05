@@ -64,7 +64,8 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   IterDomainGraph(Fusion* fusion, bool allow_self_mapping = false);
 
   // Returns the disjoint set according to one of the mapping mode types.
-  const DisjointSets<IterDomain*>& getNodes(IdMappingMode mode) const;
+  const DisjointSets<IterDomain*>& getDisjointIdsSet(IdMappingMode mode) const;
+
   // Consumers and producers is not symmetric like the other sets
   const std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>&
   consumers() const {
@@ -94,7 +95,7 @@ class TORCH_CUDA_CU_API IterDomainGraph {
     return self_mapping_info_.has_value();
   }
 
-  // Update the LOOP nodes with resolved computeWith
+  // Update the LOOP ID disjoint sets with resolved computeWith
   void updateComputeWith(TensorView* compute_with_tv);
 
  private:
@@ -114,14 +115,15 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // be replayed the same as eachother, so mapping them is very straightforward.
   void mapMultiOutput(Expr* expr);
 
-  // Fills nodes_[IdMappingMode::EXACT] for relationships between inputs and
-  // first output of expr
+  // Fills disjoint_ids_[IdMappingMode::EXACT] for relationships between inputs
+  // and first output of expr
   void mapExact(Expr* expr);
 
-  // Fills nodes_[IdMappingMode::PERMISSIVE] for relationships between inputs
-  // and first output of expr
+  // Fills disjoint_ids_[IdMappingMode::PERMISSIVE] for relationships between
+  // inputs and first output of expr
   //
-  // Currently also fills nodes_[IdMappingMode::LOOP], consumer_, and producer_
+  // Currently also fills disjoint_ids_[IdMappingMode::LOOP], consumer_, and
+  // producer_
   void mapPermissiveAndLoop(Expr* expr);
 
   // Propagates forward then backward through all view like rfactor
@@ -139,12 +141,12 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   // ======= END Iteration domain build process in order called =======
 
-  // Non-const internal only version of getNodes.
-  DisjointSets<IterDomain*>& nodes(IdMappingMode mode);
+  // Non-const internal only version of getDisjointIdsSet.
+  DisjointSets<IterDomain*>& disjointIdsSet(IdMappingMode mode);
 
   // Simple alias
-  void mapNodes(IterDomain* id0, IterDomain* id1, IdMappingMode mode) {
-    nodes(mode).mapEntries(id0, id1);
+  void mapIds(IterDomain* id0, IterDomain* id1, IdMappingMode mode) {
+    disjointIdsSet(mode).mapEntries(id0, id1);
   }
 
   // Checks if expr's are considered "the same" where sameness inputs and
@@ -166,7 +168,7 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Using an array here might be nice, but it seems hard to use an enum as an
   // array key
   // https://stackoverflow.com/questions/2102582/how-can-i-count-the-items-in-an-enum
-  std::unordered_map<IdMappingMode, DisjointSets<IterDomain*>> nodes_;
+  std::unordered_map<IdMappingMode, DisjointSets<IterDomain*>> disjoint_ids_;
 
   // Consumers and producers is not symmetric like the other sets
   // TODO: Generalize to mapping type. Mappings between producer TV ids and
@@ -228,7 +230,7 @@ class TORCH_CUDA_CU_API ComputeAtMap {
 
   //! Simple alias to IdGraph mappings.
   bool areMapped(IterDomain* id0, IterDomain* id1, IdMappingMode mode) const {
-    return idGraph().getNodes(mode).strictAreMapped(id0, id1);
+    return idGraph().getDisjointIdsSet(mode).strictAreMapped(id0, id1);
   }
   //! Returns an iter domain that is the maximum expanded size of all iter
   //! domains the one provided maps to. Useful for opening loops to the correct

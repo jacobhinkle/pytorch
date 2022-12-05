@@ -51,7 +51,7 @@ class DomainMap : public pointwise_utils::DomainMap {
     IterDomain* mapped_id = nullptr;
     for (auto i : c10::irange(root_dom.size())) {
       if (ca_map_.idGraph()
-              .getNodes(IdMappingMode::EXACT)
+              .getDisjointIdsSet(IdMappingMode::EXACT)
               .permissiveAreMapped(root_dom[i], root_dim)) {
         mapped_id = root_dom[i];
         break;

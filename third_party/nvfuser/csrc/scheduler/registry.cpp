@@ -507,7 +507,9 @@ bool requiresForwardViewReplay(Fusion* fusion, ComputeAtMap& ca_map) {
   // Mark those as an active use of the rfactor, if two are detected, return
   // true.
   for (const auto& disjoint_set_shared_ptr :
-       ca_map.idGraph().getNodes(IdMappingMode::EXACT).disjointSets()) {
+       ca_map.idGraph()
+           .getDisjointIdsSet(IdMappingMode::EXACT)
+           .disjointSets()) {
     // Make sure there's at least one rfactor domain in the set, otherwise we
     // don't need to check anything from this set.
     if (!std::any_of(

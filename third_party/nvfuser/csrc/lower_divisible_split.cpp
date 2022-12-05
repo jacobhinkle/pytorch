@@ -91,7 +91,7 @@ std::unordered_set<Split*> getAllDivisibleSplits(
     auto original_view_split = entry.second;
 
     const auto& exact_mapped_ids = ca_map->idGraph()
-                                       .getNodes(IdMappingMode::EXACT)
+                                       .getDisjointIdsSet(IdMappingMode::EXACT)
                                        .getDisjointSetOf(concrete_id)
                                        .vector();
     for (auto other_id : exact_mapped_ids) {
