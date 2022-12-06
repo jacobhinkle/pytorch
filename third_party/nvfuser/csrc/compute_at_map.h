@@ -66,6 +66,9 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Returns the disjoint set according to one of the mapping mode types.
   const DisjointSets<IterDomain*>& getDisjointIdsSet(IdMappingMode mode) const;
 
+  // Returns the disjoint set according to one of the mapping mode types.
+  const DisjointSets<Expr*>& getDisjointExprsSet(IdMappingMode mode) const;
+
   // Consumers and producers is not symmetric like the other sets
   const std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>&
   consumers() const {
@@ -103,6 +106,9 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   // ======= START Iteration domain build process in order called =======
 
+  // Fills id_uses_ for all IterDomains active in the fusion.
+  void buildIterDomainUses(Fusion* fusion);
+
   // Initializes entries for the provided IterDomain in the overall
   // IterDomainGraph
   void initializeId(IterDomain* id, bool is_view_rfactor_id, bool is_leaf_id);
@@ -126,6 +132,10 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // producer_
   void mapPermissiveAndLoop(Expr* expr);
 
+  // Map through loop swizzles, as input/output IterDomains are exact, only the
+  // order they're traversed differs.
+  void mapThroughLoopSwizzles(IdMappingMode mode);
+
   // Propagates forward then backward through all view like rfactor
   // transformations to map cross view operations.
   //
@@ -144,10 +154,12 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Non-const internal only version of getDisjointIdsSet.
   DisjointSets<IterDomain*>& disjointIdsSet(IdMappingMode mode);
 
-  // Simple alias
-  void mapIds(IterDomain* id0, IterDomain* id1, IdMappingMode mode) {
-    disjointIdsSet(mode).mapEntries(id0, id1);
-  }
+  // Non-const internal only version of getDisjointExprsSet.
+  DisjointSets<Expr*>& disjointExprsSet(IdMappingMode mode);
+
+  // Set id0 and id1 to mapped in disjointIdsSet[mode], update id0->definition()
+  // and id1->definition() sets in disjointExprsSet.
+  void mapIds(IterDomain* id0, IterDomain* id1, IdMappingMode mode);
 
   // Checks if expr's are considered "the same" where sameness inputs and
   // outputs in the same position across expressions map with  provided
@@ -156,19 +168,28 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   //   will map outputs
   // else
   //   will map inputs
-  // in the provided mode
-  void mapThroughExpr(
+  // in the provided mode.
+  // Returns if expressions were mapped through.
+  bool mapThroughExpr(
       Expr* first,
       Expr* second,
       bool forward,
       IdMappingMode mode);
 
-  // Keeps a disjoint set entry for all IterDomain mapping mode types.
+  // Keeps a disjoint set entry for all IterDomain for all mapping mode types.
   //
   // Using an array here might be nice, but it seems hard to use an enum as an
   // array key
   // https://stackoverflow.com/questions/2102582/how-can-i-count-the-items-in-an-enum
   std::unordered_map<IdMappingMode, DisjointSets<IterDomain*>> disjoint_ids_;
+
+  // Keeps a disjoint set entry for all Expressions for all mapping mode types.
+  std::unordered_map<IdMappingMode, DisjointSets<Expr*>> disjoint_exprs_;
+
+  // If multiple transformations occur IterDomains could have multiple uses,
+  // however only one should be active in the given Fusion. Track what the
+  // active IterDomain uses are, they can only be used once.
+  std::unordered_map<IterDomain*, Expr*> id_uses_;
 
   // Consumers and producers is not symmetric like the other sets
   // TODO: Generalize to mapping type. Mappings between producer TV ids and
