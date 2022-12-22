@@ -644,6 +644,9 @@ struct ForwardingInfo {
       consumer_compliment_map;
 
   ForwardingInfo(const TensorView* producer, const TensorView* consumer) {
+    // Active indicates the TV that has axes the other TV does not. For
+    // broadcast this is the consumer squeeze the producer.
+    //
     // Either producer or consumer maps depending on operation
     std::unordered_map<IterDomain*, IterDomain*>* active_forwarding_map =
         nullptr;
@@ -678,6 +681,8 @@ struct ForwardingInfo {
 
     // Collect which root ids are only in active_tv but not in the inactive
     // tensor.
+    //
+    // Initialize which id's should beforwarded.
     std::unordered_set<IterDomain*> forwarded_ids;
     for (auto i : c10::irange(active_dim_flags->size())) {
       if (active_dim_flags->at(i)) {
@@ -694,21 +699,21 @@ struct ForwardingInfo {
             active_tv->domain()->domain().begin(),
             active_tv->domain()->domain().end()));
 
-    auto isIdOnlyInActiveTv = [&forwarded_ids](IterDomain* input_id) {
+    auto isInForwardIdSet = [&forwarded_ids](IterDomain* input_id) {
       return forwarded_ids.count(input_id) > 0;
     };
 
     for (auto expr : active_tv_history) {
       auto input_ids = ir_utils::filterByType<IterDomain>(expr->inputs());
       // If expr inputs are all in forwarded_ids, then so are all outputs
-      if (std::all_of(input_ids.begin(), input_ids.end(), isIdOnlyInActiveTv)) {
+      if (std::all_of(input_ids.begin(), input_ids.end(), isInForwardIdSet)) {
         for (auto output_ids :
              ir_utils::filterByType<IterDomain>(expr->outputs())) {
           forwarded_ids.emplace(output_ids);
         }
       } else if (
           expr->isA<Merge>() &&
-          std::any_of(input_ids.begin(), input_ids.end(), isIdOnlyInActiveTv)) {
+          std::any_of(input_ids.begin(), input_ids.end(), isInForwardIdSet)) {
         auto merge_expr = expr->as<Merge>();
         // If
         // - one of the inputs is made of id's in active_tv that don't map to
@@ -724,7 +729,7 @@ struct ForwardingInfo {
         std::vector<IterDomain*> compliment_ids;
 
         for (auto input_id : input_ids) {
-          if (!isIdOnlyInActiveTv(input_id)) {
+          if (!isInForwardIdSet(input_id)) {
             forwarded_ids.emplace_back(input_id);
             active_forwarding_map->emplace(
                 std::make_pair(input_id, merge_expr->out()));
