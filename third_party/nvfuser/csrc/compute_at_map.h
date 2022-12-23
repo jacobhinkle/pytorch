@@ -121,20 +121,17 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // be replayed the same as eachother, so mapping them is very straightforward.
   void mapMultiOutput(Expr* expr);
 
-  // Fills disjoint_ids_[IdMappingMode::EXACT] for relationships between inputs
-  // and first output of expr
-  void mapExact(Expr* expr);
-
-  // Fills disjoint_ids_[IdMappingMode::PERMISSIVE] for relationships between
-  // inputs and first output of expr
-  //
-  // Currently also fills disjoint_ids_[IdMappingMode::LOOP], consumer_, and
-  // producer_
-  void mapPermissiveAndLoop(Expr* expr);
-
   // Map through loop swizzles, as input/output IterDomains are exact, only the
   // order they're traversed differs.
   void mapThroughLoopSwizzles(IdMappingMode mode);
+
+  // Fills disjoint_ids_[IdMappingMode::EXACT] for relationships between inputs
+  // and first output of expr
+  void buildExactMap(const std::vector<Expr*>& exprs);
+
+  // Fills disjoint_ids_[IdMappingMode::PERMISSIVE]. Initialize PermissiveMap as
+  // AlmostExact entries, then map through broadcasts
+  void buildPermissiveMap(const std::vector<Expr*>& exprs);
 
   // Propagates forward then backward through all view like rfactor
   // transformations to map cross view operations.
@@ -145,9 +142,14 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // reason we can't do this on all such transformations.
   void mapRFactorExprs(Fusion* fusion);
 
-  // Initialize AlmostExact as Exact entries, then map anything that's either
-  // merged with a size-1 or split by a size-1 dimension.
+  // Fills disjoint_ids_[IdMappingMode::ALMOSTEXACT]. Initialize AlmostExact as
+  // Exact entries, then map anything that's either merged with a size-1 or
+  // split by a size-1 dimension.
   void buildAlmostExactMap();
+
+  // Fills disjoint_ids_[IdMappingMode::LOOP] for relationships between inputs
+  // and first output of expr
+  void buildLoopMap(const std::vector<Expr*>& exprs);
 
   // ======= END Iteration domain build process in order called =======
 

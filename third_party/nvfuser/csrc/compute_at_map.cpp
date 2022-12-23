@@ -604,99 +604,81 @@ void IterDomainGraph::mapThroughLoopSwizzles(IdMappingMode mode) {
   }
 }
 
-void IterDomainGraph::mapExact(Expr* expr) {
-  TensorView* c_tv = ir_utils::getTvOutput(expr);
+void IterDomainGraph::buildExactMap(const std::vector<Expr*>& exprs) {
+  for (auto expr : exprs) {
+    TensorView* c_tv = ir_utils::getTvOutput(expr);
 
-  auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
-  for (auto p_tv : tv_inputs) {
-    // For exact mapings do not map any broadcast dimensions to
-    // non-broadcast dimensions. Prevent any broadcasted axes being mapped
-    // to non-broadcasted axes.
-    auto exact_c2p_root_map =
-        PairwiseRootDomainMap(p_tv, c_tv, true)
-            .mapConsumerToProducer(c_tv->domain(), p_tv->domain());
+    auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
+    for (auto p_tv : tv_inputs) {
+      // For exact mapings do not map any broadcast dimensions to
+      // non-broadcast dimensions. Prevent any broadcasted axes being mapped
+      // to non-broadcasted axes.
+      auto exact_c2p_root_map =
+          PairwiseRootDomainMap(p_tv, c_tv, true)
+              .mapConsumerToProducer(c_tv->domain(), p_tv->domain());
 
-    for (auto c_id : getSortedKeys(exact_c2p_root_map, Statement::lessThan)) {
-      auto p_id = exact_c2p_root_map.at(c_id);
-      mapIds(c_id, p_id, IdMappingMode::EXACT);
+      for (auto c_id : getSortedKeys(exact_c2p_root_map, Statement::lessThan)) {
+        auto p_id = exact_c2p_root_map.at(c_id);
+        mapIds(c_id, p_id, IdMappingMode::EXACT);
+      }
+
+      // Same as permissive above but for exact
+      auto exact_replay_PasC = BestEffortReplay(
+          p_tv->domain()->domain(),
+          c_tv->domain()->domain(),
+          exact_c2p_root_map);
+
+      const auto& exact_c2p_map = exact_replay_PasC.getReplay();
+
+      for (auto c_id : getSortedKeys(exact_c2p_map, Statement::lessThan)) {
+        auto p_id = exact_c2p_map.at(c_id);
+
+        // TODO: consumers/producers should be on a per map basis, mapping
+        // should include unique expr between the disjoint sets
+        consumers_.at(p_id).pushBack(c_id);
+        producers_.at(c_id).pushBack(p_id);
+      }
     }
 
-    // Same as permissive above but for exact
-    auto exact_replay_PasC = BestEffortReplay(
-        p_tv->domain()->domain(), c_tv->domain()->domain(), exact_c2p_root_map);
-
-    const auto& exact_c2p_map = exact_replay_PasC.getReplay();
-
-    for (auto c_id : getSortedKeys(exact_c2p_map, Statement::lessThan)) {
-      auto p_id = exact_c2p_map.at(c_id);
-
-      // TODO: consumers/producers should be on a per map basis, mapping
-      // should include unique expr between the disjoint sets
-      consumers_.at(p_id).pushBack(c_id);
-      producers_.at(c_id).pushBack(p_id);
-    }
+    mapThroughLoopSwizzles(IdMappingMode::EXACT);
   }
-
-  mapThroughLoopSwizzles(IdMappingMode::EXACT);
 }
 
-void IterDomainGraph::mapPermissiveAndLoop(Expr* expr) {
-  // Multiple outputs are already mapped, we can ignore all but the first
-  // consumer given they have to be replayed in the same exact way
-  TensorView* c_tv = ir_utils::getTvOutput(expr);
+void IterDomainGraph::buildPermissiveMap(const std::vector<Expr*>& exprs) {
+  for (auto expr : exprs) {
+    // Multiple outputs are already mapped, we can ignore all but the first
+    // consumer given they have to be replayed in the same exact way
+    // Multiple outputs are already mapped, we can ignore all but the first
+    // consumer given they have to be replayed in the same exact way
+    TensorView* c_tv = ir_utils::getTvOutput(expr);
 
-  auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
+    auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
 
-  for (auto p_tv : tv_inputs) {
-    auto p_ids_vec = ir_utils::allIDsOf(p_tv);
-    auto c_ids_vec = ir_utils::allIDsOf(c_tv);
-    std::unordered_set<IterDomain*> p_ids(p_ids_vec.begin(), p_ids_vec.end());
-    std::unordered_set<IterDomain*> c_ids(c_ids_vec.begin(), c_ids_vec.end());
+    for (auto p_tv : tv_inputs) {
+      auto p_ids_vec = ir_utils::allIDsOf(p_tv);
+      auto c_ids_vec = ir_utils::allIDsOf(c_tv);
+      std::unordered_set<IterDomain*> p_ids(p_ids_vec.begin(), p_ids_vec.end());
+      std::unordered_set<IterDomain*> c_ids(c_ids_vec.begin(), c_ids_vec.end());
 
-    auto permissive_c2p_root_map = PairwiseRootDomainMap(p_tv, c_tv);
+      auto permissive_c2p_root_map = PairwiseRootDomainMap(p_tv, c_tv);
 
-    // Look for matching ID transformations in producer and consumer, replay
-    // producer as consumer. We use the symmetric API of BestEffortReplay so
-    // that both broadcast and squeeze are handled correctly.
-    const auto permissive_disjoint_sets =
-        BestEffortReplay::replayPasC(p_tv, c_tv, -1, permissive_c2p_root_map)
-            .getIterDomainEquivalence();
+      // Look for matching ID transformations in producer and consumer, replay
+      // producer as consumer. We use the symmetric API of BestEffortReplay so
+      // that both broadcast and squeeze are handled correctly.
+      const auto permissive_disjoint_sets =
+          BestEffortReplay::replayPasC(p_tv, c_tv, -1, permissive_c2p_root_map)
+              .getIterDomainEquivalence();
 
-    for (auto& dset : permissive_disjoint_sets.disjointSets()) {
-      auto& vec = dset->vector();
-      for (auto i : c10::irange(vec.size())) {
-        auto id1 = vec[i];
-        mapIds(id1, vec[0], IdMappingMode::PERMISSIVE);
-
-        // Add the swizzle inputs to the same
-        //  disjoint set as well if either c_id
-        //  or p_id is swizzle output.
-        mapMaybeSwizzleOp(disjointIdsSet(IdMappingMode::PERMISSIVE), id1);
-
-        // Loop/producer/consumer
-        for (auto j : c10::irange(i + 1, vec.size())) {
-          auto id2 = vec[j];
-          if (p_ids.count(id1) && c_ids.count(id2)) {
-            consumers_.at(id1).pushBack(id2);
-            producers_.at(id2).pushBack(id1);
-            if (idIsAComputeAtLeafDomain(id1, p_tv, c_tv) &&
-                idIsALeafDomain(id2, c_tv)) {
-              mapIds(id1, id2, IdMappingMode::LOOP);
-            }
-          }
-          if (c_ids.count(id1) && p_ids.count(id2)) {
-            producers_.at(id1).pushBack(id2);
-            consumers_.at(id2).pushBack(id1);
-            if (idIsAComputeAtLeafDomain(id2, p_tv, c_tv) &&
-                idIsALeafDomain(id1, c_tv)) {
-              mapIds(id1, id2, IdMappingMode::LOOP);
-            }
-          }
+      for (auto& dset : permissive_disjoint_sets.disjointSets()) {
+        auto& vec = dset->vector();
+        for (auto i : c10::irange(vec.size())) {
+          auto id1 = vec[i];
+          mapIds(id1, vec[0], IdMappingMode::PERMISSIVE);
+          mapMaybeSwizzleOp(disjointIdsSet(IdMappingMode::PERMISSIVE), id1);
         }
       }
     }
   }
-
   mapThroughLoopSwizzles(IdMappingMode::PERMISSIVE);
 }
 
@@ -887,6 +869,58 @@ void IterDomainGraph::buildAlmostExactMap() {
   }
 }
 
+void IterDomainGraph::buildLoopMap(const std::vector<Expr*>& exprs) {
+  for (auto expr : exprs) {
+    // Multiple outputs are already mapped, we can ignore all but the first
+    // consumer given they have to be replayed in the same exact way
+    TensorView* c_tv = ir_utils::getTvOutput(expr);
+
+    auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
+
+    for (auto p_tv : tv_inputs) {
+      auto p_ids_vec = ir_utils::allIDsOf(p_tv);
+      auto c_ids_vec = ir_utils::allIDsOf(c_tv);
+      std::unordered_set<IterDomain*> p_ids(p_ids_vec.begin(), p_ids_vec.end());
+      std::unordered_set<IterDomain*> c_ids(c_ids_vec.begin(), c_ids_vec.end());
+
+      auto permissive_c2p_root_map = PairwiseRootDomainMap(p_tv, c_tv);
+
+      // Look for matching ID transformations in producer and consumer, replay
+      // producer as consumer. We use the symmetric API of BestEffortReplay so
+      // that both broadcast and squeeze are handled correctly.
+      const auto permissive_disjoint_sets =
+          BestEffortReplay::replayPasC(p_tv, c_tv, -1, permissive_c2p_root_map)
+              .getIterDomainEquivalence();
+
+      for (auto& dset : permissive_disjoint_sets.disjointSets()) {
+        auto& vec = dset->vector();
+        for (auto i : c10::irange(vec.size())) {
+          auto id1 = vec[i];
+          for (auto j : c10::irange(i + 1, vec.size())) {
+            auto id2 = vec[j];
+            if (p_ids.count(id1) && c_ids.count(id2)) {
+              consumers_.at(id1).pushBack(id2);
+              producers_.at(id2).pushBack(id1);
+              if (idIsAComputeAtLeafDomain(id1, p_tv, c_tv) &&
+                  idIsALeafDomain(id2, c_tv)) {
+                mapIds(id1, id2, IdMappingMode::LOOP);
+              }
+            }
+            if (c_ids.count(id1) && p_ids.count(id2)) {
+              producers_.at(id1).pushBack(id2);
+              consumers_.at(id2).pushBack(id1);
+              if (idIsAComputeAtLeafDomain(id2, p_tv, c_tv) &&
+                  idIsALeafDomain(id1, c_tv)) {
+                mapIds(id1, id2, IdMappingMode::LOOP);
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 void IterDomainGraph::build(Fusion* fusion) {
   FusionGuard fg(fusion);
 
@@ -911,23 +945,20 @@ void IterDomainGraph::build(Fusion* fusion) {
     mapMultiOutput(expr);
   }
 
-  for (auto expr : fusion->exprs()) {
-    // Connect ID's on the exact dimension
-    mapExact(expr);
-  }
-
-  for (auto expr : fusion->exprs()) {
-    // Connect across the permissive, loop, and for now consumer_, producer_
-    // dimensions.
-    mapPermissiveAndLoop(expr);
-  }
+  buildExactMap(tv_exprs);
+  buildPermissiveMap(tv_exprs);
 
   // Map forward and backward through TV root<->rfactor to cross map
   // connections that are not explicitly defined through input<->output
   // expression maps.
+  //
+  // Updates both permissive and exact mapping, must be done after exact and
+  // permissive maps are built but before we copy the exact map for the almost
+  // exact map.
   mapRFactorExprs(fusion);
 
   buildAlmostExactMap();
+  buildLoopMap(tv_exprs);
 
   // Debug, make sure there's no self mapping in TensorView's during lowering
   // that would invalidate lowering assumptions.
