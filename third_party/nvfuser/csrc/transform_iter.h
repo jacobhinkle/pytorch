@@ -118,6 +118,47 @@ class TORCH_CUDA_CU_API ReplayTransformations : public IterVisitor {
   }
 };
 
+// Maps that track information relevant to best effort replay about newly added
+// or squeezed broadcast axes
+//
+// For example if we have consumer: T0[i0, b1, b2, i3] and producer:
+// T1[i0, i3]
+//
+// If consumer transformations are:
+// -> T[i0, b1o, b1i, b2o, b2i, i3]
+// -> T[i0*b1i, b1o, b2o, b2i, i3]
+// -> T[i0*b1i*b2o, b1o, b2i, i3]
+// -> T[i0*b1i*b2o*i3, b1o, b2i]
+//
+// forwarding_map would forward i0->i0*b1i and i0*b1i->i0*b1i*b2o
+// compliment_map would have the entry i0->b1i and i0*b1i->b2o
+//
+// The first is to fast forward transformations in consumer involving broadcast
+// axes not in producer. The compliment map is to use later to compute what leaf
+// nodes we may have after the forwarding process is finished. Leaf nodes are
+// only important for replayCasP, so look there to see how this is done. Forward
+// map is used for replayCasP and replayPasC.
+class ForwardingInfo {
+ public:
+  // Map IterDomain* axes that can safely be forwarded to their output.
+  std::unordered_map<IterDomain*, IterDomain*> producer_forwarding_map;
+  std::unordered_map<IterDomain*, IterDomain*> consumer_forwarding_map;
+
+  // Given a forward id map id_input -> id_forwarded
+  // Track the other inputs in the expr that id_input is an input to. These will
+  // be used to adjust the replay's leaf tracking. Don't need to track one to
+  // many as currently transformations on IterDomains can only have maximum 2
+  // inputs, but maybe in the future we'll have more.
+  std::unordered_map<IterDomain*, std::vector<IterDomain*>>
+      producer_compliment_map;
+  std::unordered_map<IterDomain*, std::vector<IterDomain*>>
+      consumer_compliment_map;
+
+  ForwardingInfo(const TensorView* producer, const TensorView* consumer);
+
+  ForwardingInfo() = delete;
+};
+
 /*
  * Short Description:
  *

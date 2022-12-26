@@ -79,7 +79,8 @@ TEST_F(NVFuserTest, FusionSimpleSwizzle1_CUDA) {
   //[O, 4, 4]
 
   tv2->computeAt(tv3, 1);
-  tv2->swizzle(Swizzle2DType::ZShape, -2, -1);
+  // TODO: Revisit
+  tv2->swizzle(Swizzle2DType::ZShape, -2, -1, SwizzleMode::Loop);
 
   // Inlining a producer into a swizzled consumer is ok
   tv1->computeAt(tv2, -1);
