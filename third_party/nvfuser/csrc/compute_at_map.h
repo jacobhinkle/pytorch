@@ -104,6 +104,10 @@ class TORCH_CUDA_CU_API IterDomainGraph {
  private:
   void build(Fusion* fusion);
 
+  // Copies all information computed for from into to. Useful for incremental
+  // building of graph without having to rebuild entire graphs under a new mode.
+  void copyGraph(IdMappingMode from_mode, IdMappingMode to_mode);
+
   // ======= START Iteration domain build process in order called =======
 
   // Fills id_uses_ for all IterDomains active in the fusion.
@@ -187,6 +191,20 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   // Keeps a disjoint set entry for all Expressions for all mapping mode types.
   std::unordered_map<IdMappingMode, DisjointSets<Expr*>> disjoint_exprs_;
+
+  std::unordered_map<
+      IdMappingMode,
+      std::unordered_map<
+          std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>,
+          VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>>>
+      unique_definitions_;
+
+  std::unordered_map<
+      IdMappingMode,
+      std::unordered_map<
+          std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>,
+          VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>>>
+      unique_uses_;
 
   // If multiple transformations occur IterDomains could have multiple uses,
   // however only one should be active in the given Fusion. Track what the

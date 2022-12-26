@@ -206,17 +206,23 @@ class DisjointSets {
   }
 
   // Initializes a new set for provided entry
-  //
-  // TODO: Return iterator
-  void initializeSet(T entry) {
-    if (disjoint_set_maps_.find(entry) != disjoint_set_maps_.end()) {
-      return;
+  std::pair<
+      typename std::unordered_map<
+          T,
+          std::shared_ptr<VectorOfUniqueEntries<T, Hash>>,
+          Hash>::iterator,
+      bool>
+  initializeSet(T entry) {
+    auto disjoint_set_maps_it = disjoint_set_maps_.find(entry);
+    if (disjoint_set_maps_it != disjoint_set_maps_.end()) {
+      return std::make_pair(disjoint_set_maps_it, false);
     }
 
     disjoint_sets_.push_back(
         std::make_shared<VectorOfUniqueEntries<T, Hash>>());
     disjoint_sets_.back()->pushBack(entry);
-    disjoint_set_maps_.emplace(std::make_pair(entry, disjoint_sets_.back()));
+    return disjoint_set_maps_.emplace(
+        std::make_pair(entry, disjoint_sets_.back()));
   }
 
   // Adds all of the disjoint set belonging to entry1 to the disjoint set
