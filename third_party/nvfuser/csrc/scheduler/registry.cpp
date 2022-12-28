@@ -508,7 +508,7 @@ bool requiresForwardViewReplay(Fusion* fusion, ComputeAtMap& ca_map) {
   // true.
   for (const auto& disjoint_set_shared_ptr :
        ca_map.idGraph()
-           .getDisjointIdsSet(IdMappingMode::EXACT)
+           .getDisjointIdSets(IdMappingMode::EXACT)
            .disjointSets()) {
     // Make sure there's at least one rfactor domain in the set, otherwise we
     // don't need to check anything from this set.

@@ -70,7 +70,7 @@ IterDomainGraph::IterDomainGraph(Fusion* fusion, bool allow_self_mapping) {
   }
 }
 
-const DisjointSets<IterDomain*>& IterDomainGraph::getDisjointIdsSet(
+const DisjointSets<IterDomain*>& IterDomainGraph::getDisjointIdSets(
     IdMappingMode mode) const {
   auto disjoint_ids_it = disjoint_ids_.find(mode);
   TORCH_INTERNAL_ASSERT(
@@ -79,6 +79,26 @@ const DisjointSets<IterDomain*>& IterDomainGraph::getDisjointIdsSet(
       mode,
       " not supported.");
   return disjoint_ids_it->second;
+}
+
+std::pair<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>, bool>
+IterDomainGraph::getDisjointIdSet(IterDomain* id, IdMappingMode mode) const {
+  auto disjoint_mode_it = disjoint_ids_.find(mode);
+
+  auto null_return = std::make_pair(
+      std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>(nullptr), false);
+
+  if (disjoint_mode_it == disjoint_ids_.end()) {
+    return null_return;
+  }
+
+  const auto& disjoint_set = disjoint_mode_it->second;
+  auto disjoint_set_it = disjoint_set.disjointSetMap().find(id);
+  if (disjoint_set_it == disjoint_set.disjointSetMap().end()) {
+    return null_return;
+  }
+
+  return std::make_pair(disjoint_set_it->second, true);
 }
 
 DisjointSets<IterDomain*>& IterDomainGraph::disjointIdsSet(IdMappingMode mode) {
@@ -91,7 +111,7 @@ DisjointSets<IterDomain*>& IterDomainGraph::disjointIdsSet(IdMappingMode mode) {
   return disjoint_ids_it->second;
 }
 
-const DisjointSets<Expr*>& IterDomainGraph::getDisjointExprsSet(
+const DisjointSets<Expr*>& IterDomainGraph::getDisjointExprSets(
     IdMappingMode mode) const {
   auto disjoint_exprs_it = disjoint_exprs_.find(mode);
   TORCH_INTERNAL_ASSERT(
@@ -100,6 +120,26 @@ const DisjointSets<Expr*>& IterDomainGraph::getDisjointExprsSet(
       mode,
       " not supported.");
   return disjoint_exprs_it->second;
+}
+
+std::pair<std::shared_ptr<VectorOfUniqueEntries<Expr*>>, bool> IterDomainGraph::
+    getDisjointExprSet(Expr* expr, IdMappingMode mode) const {
+  auto disjoint_mode_it = disjoint_exprs_.find(mode);
+
+  auto null_return = std::make_pair(
+      std::shared_ptr<VectorOfUniqueEntries<Expr*>>(nullptr), false);
+
+  if (disjoint_mode_it == disjoint_exprs_.end()) {
+    return null_return;
+  }
+
+  const auto& disjoint_set = disjoint_mode_it->second;
+  auto disjoint_set_it = disjoint_set.disjointSetMap().find(expr);
+  if (disjoint_set_it == disjoint_set.disjointSetMap().end()) {
+    return null_return;
+  }
+
+  return std::make_pair(disjoint_set_it->second, true);
 }
 
 DisjointSets<Expr*>& IterDomainGraph::disjointExprsSet(IdMappingMode mode) {
@@ -162,7 +202,7 @@ bool IterDomainGraph::exprsMap(
             zipped_ids.begin(),
             zipped_ids.end(),
             [&](std::pair<IterDomain*, IterDomain*> id_pair) {
-              return !getDisjointIdsSet(mode).permissiveAreMapped(
+              return !getDisjointIdSets(mode).permissiveAreMapped(
                   id_pair.first, id_pair.second);
             })) {
       return false;
@@ -433,7 +473,7 @@ c10::optional<std::pair<IterDomain*, IterDomain*>> detectMappablePair(
       if (id1 == id2) {
         continue;
       }
-      if (id_graph.getDisjointIdsSet(mode).disjointSetMap().at(id1)->has(id2)) {
+      if (id_graph.getDisjointIdSets(mode).permissiveAreMapped(id1, id2)) {
         return std::make_pair(id1, id2);
       }
     }
@@ -543,11 +583,11 @@ IterDomainGraph::mapBetween(
       from_ids2set;
 
   for (auto from_id : from_ids) {
-    auto from_it = getDisjointIdsSet(mode).disjointSetMap().find(from_id);
-    if (from_it == getDisjointIdsSet(mode).disjointSetMap().end()) {
+    auto from_disjoint_set_pair = getDisjointIdSet(from_id, mode);
+    if (!from_disjoint_set_pair.second) {
       continue;
     }
-    from_ids2set[from_id] = from_it->second;
+    from_ids2set[from_id] = from_disjoint_set_pair.first;
   }
 
   // Map from the sets associated with the IterDomains in to, to the
@@ -557,16 +597,17 @@ IterDomainGraph::mapBetween(
       set2to_ids;
 
   for (auto to_id : to_ids) {
-    auto to_it = getDisjointIdsSet(mode).disjointSetMap().find(to_id);
-    if (to_it == getDisjointIdsSet(mode).disjointSetMap().end()) {
+    auto to_disjoint_set_pair = getDisjointIdSet(to_id, mode);
+    if (!to_disjoint_set_pair.second) {
       continue;
     }
-    auto set2to_ids_it = set2to_ids.find(to_it->second);
+    auto to_set = to_disjoint_set_pair.first;
+    auto set2to_ids_it = set2to_ids.find(to_set);
 
     if (set2to_ids_it == set2to_ids.end()) {
-      set2to_ids[to_it->second] = {to_id};
+      set2to_ids[to_set] = {to_id};
     } else {
-      set2to_ids[to_it->second].pushBack(to_id);
+      set2to_ids[to_set].pushBack(to_id);
     }
   }
 
@@ -588,6 +629,60 @@ IterDomainGraph::mapBetween(
     from_ids2to_ids[from_id] = to_entry_it->second;
   }
   return from_ids2to_ids;
+}
+
+std::pair<
+    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>,
+    bool>
+IterDomainGraph::iterDomainGroupDefinitions(
+    std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> id_group,
+    IdMappingMode mode) const {
+  auto null_return = std::make_pair(
+      VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>(),
+      false);
+
+  if (id_group == nullptr) {
+    return null_return;
+  }
+
+  auto mode_it = unique_definitions_.find(mode);
+  if (mode_it == unique_definitions_.end()) {
+    return null_return;
+  }
+
+  auto definition_it = mode_it->second.find(id_group);
+  if (definition_it == mode_it->second.end()) {
+    return null_return;
+  }
+
+  return std::make_pair(definition_it->second, true);
+}
+
+std::pair<
+    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>,
+    bool>
+IterDomainGraph::iterDomainGroupUses(
+    std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> id_group,
+    IdMappingMode mode) const {
+  auto null_return = std::make_pair(
+      VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>(),
+      false);
+
+  if (id_group == nullptr) {
+    return null_return;
+  }
+
+  auto mode_it = unique_uses_.find(mode);
+  if (mode_it == unique_uses_.end()) {
+    return null_return;
+  }
+
+  auto uses_it = mode_it->second.find(id_group);
+  if (uses_it == mode_it->second.end()) {
+    return null_return;
+  }
+
+  return std::make_pair(uses_it->second, true);
 }
 
 void IterDomainGraph::buildIterDomainUses(Fusion* fusion) {
@@ -1086,10 +1181,8 @@ void IterDomainGraph::buildLoopMap(const std::vector<Expr*>& exprs) {
         auto c_id = c_ca_domain[c_id_i];
         auto p_id_it = std::find_if(
             p_ca_domain.begin(), p_ca_domain.end(), [&](IterDomain* p_id) {
-              return getDisjointIdsSet(IdMappingMode::PERMISSIVE)
-                  .disjointSetMap()
-                  .at(c_id)
-                  ->has(p_id);
+              return getDisjointIdSets(IdMappingMode::PERMISSIVE)
+                  .permissiveAreMapped(c_id, p_id);
             });
         if (p_id_it != p_ca_domain.end()) {
           mapIds(c_id, *p_id_it, IdMappingMode::LOOP);
@@ -1208,7 +1301,7 @@ void ComputeAtMap::build(Fusion* fusion) {
 
 void ComputeAtMap::validateAndPropagatePType() {
   for (const auto& loop_disjoint_set :
-       id_graph_.getDisjointIdsSet(IdMappingMode::LOOP).disjointSets()) {
+       id_graph_.getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
     ParallelType common_ptype = ParallelType::Serial;
     for (auto id : loop_disjoint_set->vector()) {
       auto id_ptype = id->getParallelType();
@@ -1234,7 +1327,7 @@ void ComputeAtMap::allocateIndexVariables() {
   //  all lowered kir::ForLoop will correspond to one of the disjoint sets
   //  and we only need one index variable for each set.
   for (const auto& loop_disjoint_set :
-       id_graph_.getDisjointIdsSet(IdMappingMode::LOOP).disjointSets()) {
+       id_graph_.getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
     ParallelType ptype;
     // first allocate thread and grid parallel indices:
     //  The validation pass will check that the parallel bindings within the
@@ -1303,12 +1396,12 @@ Val* ComputeAtMap::getIndexVariable(
     IterDomain* id,
     DoubleBufferLoopStage double_buffer_loop_stage) const {
   TORCH_INTERNAL_ASSERT(
-      id_graph_.getDisjointIdsSet(IdMappingMode::LOOP).mappingExists(id),
+      id_graph_.getDisjointIdSets(IdMappingMode::LOOP).mappingExists(id),
       "Index Variable: no index variable allocated as ",
       id->toString(),
       " is not registered in loop map");
   const auto* loop_set =
-      &(id_graph_.getDisjointIdsSet(IdMappingMode::LOOP).getDisjointSetOf(id));
+      id_graph_.getDisjointIdSet(id, IdMappingMode::LOOP).first.get();
 
   // Check if this loop was modified by double buffer pass.
   bool is_double_buffer_iterdomain =
@@ -1617,7 +1710,7 @@ void ComputeAtMap::buildConcreteIds() {
   // deterministic but which ID gets selected her depends on the traversal
   // order generating the set (compute at map build).
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdsSet(IdMappingMode::EXACT).disjointSets()) {
+       id_graph_.getDisjointIdSets(IdMappingMode::EXACT).disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");
@@ -1628,7 +1721,7 @@ void ComputeAtMap::buildConcreteIds() {
   // The following two algorithms seem quite wasteful. Should find a more
   // efficient way to compute concrete IDs.
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdsSet(IdMappingMode::PERMISSIVE).disjointSets()) {
+       id_graph_.getDisjointIdSets(IdMappingMode::PERMISSIVE).disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");
@@ -1639,7 +1732,7 @@ void ComputeAtMap::buildConcreteIds() {
 
   // Same as exact computation
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdsSet(IdMappingMode::ALMOSTEXACT).disjointSets()) {
+       id_graph_.getDisjointIdSets(IdMappingMode::ALMOSTEXACT).disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");
@@ -1649,7 +1742,7 @@ void ComputeAtMap::buildConcreteIds() {
   }
 
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdsSet(IdMappingMode::LOOP).disjointSets()) {
+       id_graph_.getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");
@@ -1707,7 +1800,7 @@ bool ComputeAtMap::areExactExprs(Expr* expr_1, Expr* expr_2) {
 void ComputeAtMap::buildUniqueExactExprMaps() {
   // Start by building definitions
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdsSet(IdMappingMode::EXACT).disjointSets()) {
+       id_graph_.getDisjointIdSets(IdMappingMode::EXACT).disjointSets()) {
     std::vector<Expr*> definitions;
 
     // N^2 in number of unique transformations, this might be better to do
@@ -1753,7 +1846,7 @@ void ComputeAtMap::buildUniqueExactExprMaps() {
 
   // Use definitions to build uses
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdsSet(IdMappingMode::EXACT).disjointSets()) {
+       id_graph_.getDisjointIdSets(IdMappingMode::EXACT).disjointSets()) {
     // Make sure uses is always initialized even there are no uses.
     if (unique_exact_uses_.find(disjoint_set_shared_ptr) ==
         unique_exact_uses_.end()) {
@@ -1915,7 +2008,7 @@ const std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>& ComputeAtMap::
 
 const DisjointSets<IterDomain*>& ComputeAtMap::getIdSets(
     IdMappingMode mode) const {
-  return id_graph_.getDisjointIdsSet(mode);
+  return id_graph_.getDisjointIdSets(mode);
 }
 
 bool ComputeAtMap::idExistsInMap(IterDomain* id) const {
@@ -2098,10 +2191,8 @@ void IterDomainGraph::updateComputeWith(TensorView* compute_with_tv) {
         consumer_tv->domain()->domain().begin(),
         consumer_tv->domain()->domain().end(),
         [&](auto consumer_id) {
-          return getDisjointIdsSet(IdMappingMode::PERMISSIVE)
-              .disjointSetMap()
-              .at(id)
-              ->has(consumer_id);
+          return getDisjointIdSets(IdMappingMode::PERMISSIVE)
+              .permissiveAreMapped(id, consumer_id);
         });
     TORCH_INTERNAL_ASSERT(
         it != consumer_tv->domain()->domain().end(),
@@ -2126,7 +2217,7 @@ void ComputeAtMap::updateComputeWith(TensorView* compute_with_tv) {
 
   // Update the LOOP concrete IDs
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdsSet(IdMappingMode::LOOP).disjointSets()) {
+       id_graph_.getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");

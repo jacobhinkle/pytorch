@@ -150,7 +150,7 @@ Val* commonOrConstExtent(
     std::shared_ptr<const ComputeAtMap> ca_map,
     IterDomain* id) {
   auto disjoint_set = ca_map->idGraph()
-                          .getDisjointIdsSet(IdMappingMode::ALMOSTEXACT)
+                          .getDisjointIdSets(IdMappingMode::ALMOSTEXACT)
                           .getDisjointSetOf(id);
   for (auto entry : disjoint_set) {
     if (entry->extent()->isConstScalar()) {

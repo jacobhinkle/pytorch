@@ -1274,7 +1274,7 @@ bool isPermissivelyMappedWithAny(IterDomain* id, const std::vector<Val*>& ids) {
         GpuLower::current()
             ->caMap()
             ->idGraph()
-            .getDisjointIdsSet(IdMappingMode::PERMISSIVE)
+            .getDisjointIdSets(IdMappingMode::PERMISSIVE)
             .permissiveAreMapped(id, val->as<IterDomain>());
   });
 }
