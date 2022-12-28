@@ -527,12 +527,67 @@ void IterDomainGraph::initializeId(
     }
   }
 
-  consumers_[id] = {};
-  producers_[id] = {};
-
   if (is_view_rfactor_id) {
     view_rfactor_ids_.emplace(id);
   }
+}
+
+std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
+IterDomainGraph::mapBetween(
+    const VectorOfUniqueEntries<IterDomain*>& from_ids,
+    const VectorOfUniqueEntries<IterDomain*>& to_ids,
+    IdMappingMode mode) {
+  std::unordered_map<
+      IterDomain*,
+      std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
+      from_ids2set;
+
+  for (auto from_id : from_ids) {
+    auto from_it = getDisjointIdsSet(mode).disjointSetMap().find(from_id);
+    if (from_it == getDisjointIdsSet(mode).disjointSetMap().end()) {
+      continue;
+    }
+    from_ids2set[from_id] = from_it->second;
+  }
+
+  // Map from the sets associated with the IterDomains in to, to the
+  std::unordered_map<
+      std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>,
+      VectorOfUniqueEntries<IterDomain*>>
+      set2to_ids;
+
+  for (auto to_id : to_ids) {
+    auto to_it = getDisjointIdsSet(mode).disjointSetMap().find(to_id);
+    if (to_it == getDisjointIdsSet(mode).disjointSetMap().end()) {
+      continue;
+    }
+    auto set2to_ids_it = set2to_ids.find(to_it->second);
+
+    if (set2to_ids_it == set2to_ids.end()) {
+      set2to_ids[to_it->second] = {to_id};
+    } else {
+      set2to_ids[to_it->second].pushBack(to_id);
+    }
+  }
+
+  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
+      from_ids2to_ids;
+  for (auto from_id : from_ids) {
+    from_ids2to_ids[from_id] = VectorOfUniqueEntries<IterDomain*>();
+
+    auto from_it = from_ids2set.find(from_id);
+    if (from_it == from_ids2set.end()) {
+      continue;
+    }
+
+    auto from_set = from_it->second;
+    auto to_entry_it = set2to_ids.find(from_set);
+    if (to_entry_it == set2to_ids.end()) {
+      continue;
+    }
+    from_ids2to_ids[from_id] = to_entry_it->second;
+  }
+  return from_ids2to_ids;
 }
 
 void IterDomainGraph::buildIterDomainUses(Fusion* fusion) {
@@ -724,23 +779,6 @@ void IterDomainGraph::buildExactMap(const std::vector<Expr*>& exprs) {
       for (auto c_id : getSortedKeys(exact_c2p_root_map, Statement::lessThan)) {
         auto p_id = exact_c2p_root_map.at(c_id);
         mapIds(c_id, p_id, IdMappingMode::EXACT);
-      }
-
-      // Same as permissive above but for exact
-      auto exact_replay_PasC = BestEffortReplay(
-          p_tv->domain()->domain(),
-          c_tv->domain()->domain(),
-          exact_c2p_root_map);
-
-      const auto& exact_c2p_map = exact_replay_PasC.getReplay();
-
-      for (auto c_id : getSortedKeys(exact_c2p_map, Statement::lessThan)) {
-        auto p_id = exact_c2p_map.at(c_id);
-
-        // TODO: consumers/producers should be on a per map basis, mapping
-        // should include unique expr between the disjoint sets
-        consumers_.at(p_id).pushBack(c_id);
-        producers_.at(c_id).pushBack(p_id);
       }
     }
 
@@ -971,50 +1009,90 @@ void IterDomainGraph::buildAlmostExactMap() {
 
 void IterDomainGraph::buildLoopMap(const std::vector<Expr*>& exprs) {
   for (auto expr : exprs) {
-    // Multiple outputs are already mapped, we can ignore all but the first
-    // consumer given they have to be replayed in the same exact way
     TensorView* c_tv = ir_utils::getTvOutput(expr);
 
+    auto all_tv_outputs = ir_utils::filterByType<TensorView>(expr->outputs());
+    // Initialize all leaf nodes in loop id set
+    for (auto tv_out : all_tv_outputs) {
+      for (auto id : tv_out->domain()->domain()) {
+        disjointIdsSet(IdMappingMode::LOOP).initializeSet(id);
+      }
+    }
+
+    // Map siblings in loop map, as all other tv output domains must match the
+    // first tv outputs domain.
+    std::deque<TensorView*> other_tv_outputs(
+        all_tv_outputs.begin(), all_tv_outputs.end());
+    other_tv_outputs.pop_front();
+
+    for (auto other_tv_output : other_tv_outputs) {
+      // Sibling tv's must be exactly mapped with eachother so simply zip their
+      // leaf iter domains.
+
+      TORCH_INTERNAL_ASSERT(
+          other_tv_output->domain()->domain().size() ==
+              c_tv->domain()->domain().size(),
+          "Multiple outputs with mismatched TV domains is not supported.");
+
+      for (auto domain_i : c10::irange(c_tv->domain()->domain().size())) {
+        auto c_id = c_tv->domain()->domain()[domain_i];
+        auto o_id = other_tv_output->domain()->domain()[domain_i];
+        TORCH_INTERNAL_ASSERT(
+            disjoint_ids_.at(IdMappingMode::EXACT).strictAreMapped(o_id, c_id),
+            "Sibling domains must exact match however the following domains do not:\n  ",
+            c_tv->toString(),
+            "\n  ",
+            other_tv_output->toString());
+        mapIds(o_id, c_id, IdMappingMode::LOOP);
+      }
+    }
+
+    // IterDomains from consumer that may match those in the producers
+    std::vector<IterDomain*> c_ca_domain(
+        c_tv->domain()->domain().begin(),
+        c_tv->domain()->domain().begin() + c_tv->getMaxProducerPosition());
+
+    if (c_ca_domain.empty()) {
+      continue;
+    }
+
     auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
-
     for (auto p_tv : tv_inputs) {
-      auto p_ids_vec = ir_utils::allIDsOf(p_tv);
-      auto c_ids_vec = ir_utils::allIDsOf(c_tv);
-      std::unordered_set<IterDomain*> p_ids(p_ids_vec.begin(), p_ids_vec.end());
-      std::unordered_set<IterDomain*> c_ids(c_ids_vec.begin(), c_ids_vec.end());
+      // IterDomains from producer that may match with those in the first
+      // consumer
+      std::vector<IterDomain*> p_ca_domain(
+          p_tv->domain()->domain().begin(),
+          p_tv->domain()->domain().begin() + p_tv->getComputeAtPosition());
 
-      auto permissive_c2p_root_map = PairwiseRootDomainMap(p_tv, c_tv);
+      // If producer is compute with the consumer, extend the matching domain to
+      // the compute with of the producer.
+      if (p_tv->hasResolvedComputeWith()) {
+        auto with_tvs = p_tv->getComputeWithConsumers();
+        if (std::find(with_tvs.begin(), with_tvs.end(), c_tv) !=
+            with_tvs.end()) {
+          p_ca_domain = std::vector<IterDomain*>(
+              p_tv->domain()->domain().begin(),
+              p_tv->domain()->domain().begin() +
+                  p_tv->getComputeWithPosition());
+        }
+      }
 
-      // Look for matching ID transformations in producer and consumer, replay
-      // producer as consumer. We use the symmetric API of BestEffortReplay so
-      // that both broadcast and squeeze are handled correctly.
-      const auto permissive_disjoint_sets =
-          BestEffortReplay::replayPasC(p_tv, c_tv, -1, permissive_c2p_root_map)
-              .getIterDomainEquivalence();
+      if (p_ca_domain.empty()) {
+        continue;
+      }
 
-      for (auto& dset : permissive_disjoint_sets.disjointSets()) {
-        auto& vec = dset->vector();
-        for (auto i : c10::irange(vec.size())) {
-          auto id1 = vec[i];
-          for (auto j : c10::irange(i + 1, vec.size())) {
-            auto id2 = vec[j];
-            if (p_ids.count(id1) && c_ids.count(id2)) {
-              consumers_.at(id1).pushBack(id2);
-              producers_.at(id2).pushBack(id1);
-              if (idIsAComputeAtLeafDomain(id1, p_tv, c_tv) &&
-                  idIsALeafDomain(id2, c_tv)) {
-                mapIds(id1, id2, IdMappingMode::LOOP);
-              }
-            }
-            if (c_ids.count(id1) && p_ids.count(id2)) {
-              producers_.at(id1).pushBack(id2);
-              consumers_.at(id2).pushBack(id1);
-              if (idIsAComputeAtLeafDomain(id2, p_tv, c_tv) &&
-                  idIsALeafDomain(id1, c_tv)) {
-                mapIds(id1, id2, IdMappingMode::LOOP);
-              }
-            }
-          }
+      // Map densly in matching entries of consumer and producer domains.
+      for (auto c_id_i : c10::irange(c_ca_domain.size())) {
+        auto c_id = c_ca_domain[c_id_i];
+        auto p_id_it = std::find_if(
+            p_ca_domain.begin(), p_ca_domain.end(), [&](IterDomain* p_id) {
+              return getDisjointIdsSet(IdMappingMode::PERMISSIVE)
+                  .disjointSetMap()
+                  .at(c_id)
+                  ->has(p_id);
+            });
+        if (p_id_it != p_ca_domain.end()) {
+          mapIds(c_id, *p_id_it, IdMappingMode::LOOP);
         }
       }
     }
@@ -1124,6 +1202,7 @@ ComputeAtMap::ComputeAtMap(Fusion* fusion)
 
 void ComputeAtMap::build(Fusion* fusion) {
   buildUniqueExactExprMaps();
+  buildConsumersMap();
   buildConcreteIds();
 }
 
@@ -1273,10 +1352,13 @@ IterDomain* ComputeAtMap::computeConcreteId(
   VectorOfUniqueEntries<IterDomain*> maybe_concrete_ids;
   for (auto id : disjoint_set_shared_ptr->vector()) {
     bool id_output = true;
-    for (auto consumer_id : id_graph_.consumers().at(id).vector()) {
-      if (disjoint_set_shared_ptr->has(consumer_id)) {
-        id_output = false;
-        break;
+    auto consumers_it = consumers_map_.find(id);
+    if (consumers_it != consumers_map_.end()) {
+      for (auto consumer_id : consumers_it->second.vector()) {
+        if (disjoint_set_shared_ptr->has(consumer_id)) {
+          id_output = false;
+          break;
+        }
       }
     }
     if (id_output) {
@@ -1489,6 +1571,44 @@ IterDomain* ComputeAtMap::computeConcreteId(
       disjoint_set_shared_ptr->toString());
 
   return concrete_id;
+}
+
+void ComputeAtMap::buildConsumersMap() {
+  // To build concrete maps we will need to know the consumers of the
+  // IterDomains in the permissive map. Build this map.
+
+  // Filter non-TensorView expressions
+  auto all_exprs = fusion_->exprs();
+  std::vector<Expr*> tv_exprs;
+
+  std::copy_if(
+      all_exprs.begin(),
+      all_exprs.end(),
+      std::back_inserter(tv_exprs),
+      [](Expr* expr) { return ir_utils::isTvOp(expr); });
+
+  for (auto expr : tv_exprs) {
+    auto consumers = ir_utils::filterByType<TensorView>(expr->outputs());
+    auto producers = ir_utils::filterByType<TensorView>(expr->inputs());
+
+    for (auto consumer : consumers) {
+      auto all_consumer_ids = ir_utils::allIDsOf(consumer);
+      // Change data structure for IterDomainGraph::mapBetween
+      VectorOfUniqueEntries<IterDomain*> consumer_ids(
+          all_consumer_ids.begin(), all_consumer_ids.end());
+      for (auto producer : producers) {
+        auto all_producer_ids = ir_utils::allIDsOf(producer);
+        // Change data structure for IterDomainGraph::mapBetween
+        VectorOfUniqueEntries<IterDomain*> producer_ids(
+            all_producer_ids.begin(), all_producer_ids.end());
+
+        auto p2c = id_graph_.mapBetween(
+            producer_ids, consumer_ids, IdMappingMode::PERMISSIVE);
+
+        consumers_map_.insert(p2c.begin(), p2c.end());
+      }
+    }
+  }
 }
 
 void ComputeAtMap::buildConcreteIds() {
@@ -1761,21 +1881,6 @@ std::string ComputeAtMap::toString() const {
      << idGraphDisjointIdSetToString(*this, IdMappingMode::LOOP);
   ss << "Permissive map:\n"
      << idGraphDisjointIdSetToString(*this, IdMappingMode::PERMISSIVE);
-  ss << "Consumer maps:\n";
-  for (auto key : getSortedKeys(id_graph_.consumers(), Statement::lessThan)) {
-    auto consumers = id_graph_.consumers().at(key);
-    std::sort(consumers.begin(), consumers.end(), Statement::lessThan);
-    ss << "  " << key->toString() << " :: " << consumers.toString() << "\n";
-  }
-
-  ss << "Producer maps:\n";
-  for (auto key : getSortedKeys(id_graph_.producers(), Statement::lessThan)) {
-    VectorOfUniqueEntries<IterDomain*> producers =
-        id_graph_.producers().at(key);
-    std::sort(producers.begin(), producers.end(), Statement::lessThan);
-    ss << "  " << key->toString() << " :: " << producers.toString() << "\n";
-  }
-
   ss << "} compute at map" << std::endl;
   return ss.str();
 }

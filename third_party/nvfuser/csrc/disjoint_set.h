@@ -40,6 +40,13 @@ class VectorOfUniqueEntries {
   VectorOfUniqueEntries(const std::initializer_list<T>& x)
       : vector_(x), set_(x) {}
 
+  template <class InputIt>
+  VectorOfUniqueEntries(InputIt first, InputIt last) {
+    while (first != last) {
+      pushBack(*first++);
+    }
+  }
+
   // Returns if a node was actually added
   bool pushBack(T entry) {
     if (set_.emplace(entry).second) {

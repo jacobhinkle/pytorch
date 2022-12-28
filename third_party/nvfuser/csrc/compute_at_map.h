@@ -69,17 +69,6 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Returns the disjoint set according to one of the mapping mode types.
   const DisjointSets<Expr*>& getDisjointExprsSet(IdMappingMode mode) const;
 
-  // Consumers and producers is not symmetric like the other sets
-  const std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>&
-  consumers() const {
-    return consumers_;
-  }
-
-  const std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>&
-  producers() const {
-    return producers_;
-  }
-
   // TODO: Seems a bit unfortunate that this isn't IterDomain local information.
   const std::unordered_set<IterDomain*>& viewRfactorIds() const {
     return view_rfactor_ids_;
@@ -100,6 +89,15 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   // Update the LOOP ID disjoint sets with resolved computeWith
   void updateComputeWith(TensorView* compute_with_tv);
+
+  // Supports one to many mappings, uses the disjoint sets of the provided mode
+  // to produce mappings between from and to. If multiple iter domains in to map
+  // to a single iter domain in from, the order of the iter domains in value of
+  // the map is preserved to be the order provided in to.
+  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>> mapBetween(
+      const VectorOfUniqueEntries<IterDomain*>& from,
+      const VectorOfUniqueEntries<IterDomain*>& to,
+      IdMappingMode mode);
 
  private:
   void build(Fusion* fusion);
@@ -210,14 +208,6 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // however only one should be active in the given Fusion. Track what the
   // active IterDomain uses are, they can only be used once.
   std::unordered_map<IterDomain*, Expr*> id_uses_;
-
-  // Consumers and producers is not symmetric like the other sets
-  // TODO: Generalize to mapping type. Mappings between producer TV ids and
-  // consumer TV ids depend on the mapping type.
-  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
-      consumers_;
-  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
-      producers_;
 
   // Hold a set of iter domains that are considered view rfactor ids. This
   // identification is particularly important to understand if split operations
@@ -380,9 +370,12 @@ class TORCH_CUDA_CU_API ComputeAtMap {
   // Build id_graph_
   void build(Fusion* fusion);
 
-  // Build concrete_id_cache_
-  // Build a single entry in  concrete_cache_id_
+  // Compute the concrete Id assocaited with id in provided mode and add its
+  // entry entry in  concrete_cache_id_
   IterDomain* computeConcreteId(IterDomain* id, IdMappingMode mode);
+
+  void buildConsumersMap();
+
   void buildConcreteIds();
 
   // Relies on concrete_id_cache_, buildConcreteIds() must be run before this.
@@ -403,6 +396,12 @@ class TORCH_CUDA_CU_API ComputeAtMap {
       std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>,
       IterDomain*>
       concrete_id_cache_;
+
+  // Permissive based map, input is a producer IterDomain and output is a list
+  // of IterDomains in producer's consumers that permissively map. Primarily
+  // used for concrete IterDomain resolution.
+  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
+      consumers_map_;
 
   // Unique expressions operating on exact disjoint set. For each IterDomain in
   // each exact disjoint set will log its definition in the std::vector<Expr*>.
