@@ -519,10 +519,8 @@ bool requiresForwardViewReplay(Fusion* fusion, ComputeAtMap& ca_map) {
       continue;
     }
 
-    // Grab all the unique definitions detected to consume the iter domains in
-    // this set
-    auto unique_defs =
-        ca_map.uniqueExactDefinitions(disjoint_set_shared_ptr->back());
+    auto defs_pair = ca_map.idGraph().iterDomainGroupDefinitions(
+        disjoint_set_shared_ptr, IdMappingMode::EXACT);
 
     // Iterate through the all the rfactor iter domains
     for (auto id_rfactor_product : disjoint_set_shared_ptr->vector()) {
@@ -563,8 +561,9 @@ bool requiresForwardViewReplay(Fusion* fusion, ComputeAtMap& ca_map) {
 
       // Check which definition in the unique exact definition set this
       // definition matches to:
-      for (auto unique_def : unique_defs) {
-        if (ca_map.areExactExprs(rfactor_def, unique_def)) {
+      for (auto def_group : defs_pair.first) {
+        auto first_def_in_group = def_group->front();
+        if (ca_map.areExactExprs(rfactor_def, first_def_in_group)) {
           // Check if we already have an expression that consumes an
           // equivalent of any of the input rfactor domains. If so and it's
           // not the already registered transformation, return true
@@ -579,10 +578,11 @@ bool requiresForwardViewReplay(Fusion* fusion, ComputeAtMap& ca_map) {
             }
 
             if (unique_exact_uses.at(inp_disjoint_set) == nullptr) {
-              // If expression is null pointer register this unique_def
-              unique_exact_uses[inp_disjoint_set] = unique_def;
+              // If expression is null pointer register this first_def_in_group
+              unique_exact_uses[inp_disjoint_set] = first_def_in_group;
             } else if (!ca_map.areExactExprs(
-                           unique_exact_uses[inp_disjoint_set], unique_def)) {
+                           unique_exact_uses[inp_disjoint_set],
+                           first_def_in_group)) {
               // Two transformations that don't match on matching rfactor
               // domains found, return true.
               return true;

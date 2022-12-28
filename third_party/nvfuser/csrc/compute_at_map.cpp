@@ -1294,7 +1294,6 @@ ComputeAtMap::ComputeAtMap(Fusion* fusion)
 }
 
 void ComputeAtMap::build(Fusion* fusion) {
-  buildUniqueExactExprMaps();
   buildConsumersMap();
   buildConcreteIds();
 }
@@ -1797,103 +1796,6 @@ bool ComputeAtMap::areExactExprs(Expr* expr_1, Expr* expr_2) {
   return true;
 }
 
-void ComputeAtMap::buildUniqueExactExprMaps() {
-  // Start by building definitions
-  for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdSets(IdMappingMode::EXACT).disjointSets()) {
-    std::vector<Expr*> definitions;
-
-    // N^2 in number of unique transformations, this might be better to do
-    // when generating the map.
-    for (auto id : disjoint_set_shared_ptr->vector()) {
-      if (id->definition() != nullptr) {
-        auto id_inputs =
-            ir_utils::filterByType<IterDomain>(id->definition()->inputs());
-        if (std::any_of(id_inputs.begin(), id_inputs.end(), [&](auto id_input) {
-              return disjoint_set_shared_ptr->has(id_input);
-            })) {
-          // Definition to this exact map, shouldn't be marked as a definition
-          // to traverse on the exact map.
-
-          // This is a WAR for FusionSimpleSwizzle2_CUDA wher there is a
-          // pattern like:
-          //
-          // tv0[32, 32]
-          // tv0->swizzle(Swizzle2DType::ZShape, 0, 1);
-          //
-          // each root domain is exact mapped with the outputs of the swizzle.
-          // So the pre and post swizzle ID is in an exact set, but that exact
-          // set also has the swizzle as a definition that leads to itself.
-          //
-          // TODO: Try to formalize this better in the exact ID traversal.
-          // Right now its just interfering with concrete ID detection.
-          continue;
-        }
-        bool match = false;
-        for (auto recorded_def : definitions) {
-          if (areExactExprs(id->definition(), recorded_def)) {
-            match = true;
-            break;
-          }
-        }
-        if (!match) {
-          definitions.push_back(id->definition());
-        }
-      }
-    }
-    unique_exact_definitions_[disjoint_set_shared_ptr] = definitions;
-  }
-
-  // Use definitions to build uses
-  for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdSets(IdMappingMode::EXACT).disjointSets()) {
-    // Make sure uses is always initialized even there are no uses.
-    if (unique_exact_uses_.find(disjoint_set_shared_ptr) ==
-        unique_exact_uses_.end()) {
-      unique_exact_uses_[disjoint_set_shared_ptr] = {};
-    }
-
-    auto definition_it =
-        unique_exact_definitions_.find(disjoint_set_shared_ptr);
-
-    if (definition_it == unique_exact_definitions_.end()) {
-      continue;
-    }
-
-    const auto& definitions = definition_it->second;
-
-    for (auto definition : definitions) {
-      auto inp_ids = ir_utils::filterByType<IterDomain>(definition->inputs());
-      for (auto inp : inp_ids) {
-        auto inp_disjoint_set_shared_ptr =
-            disjointSetOf(inp, IdMappingMode::EXACT);
-        // Initialize uses entry
-        if (unique_exact_uses_.find(inp_disjoint_set_shared_ptr) ==
-            unique_exact_uses_.end()) {
-          unique_exact_uses_[inp_disjoint_set_shared_ptr] = {};
-        }
-
-        auto& uses = unique_exact_uses_.at(inp_disjoint_set_shared_ptr);
-
-        bool already_added = false;
-        for (auto other_use : uses) {
-          if (areExactExprs(definition, other_use)) {
-            already_added = true;
-            break;
-          }
-        }
-        if (already_added) {
-          continue;
-        }
-
-        if (!already_added) {
-          uses.push_back(definition);
-        }
-      }
-    }
-  }
-}
-
 IterDomain* ComputeAtMap::getConcreteMappedID(
     IterDomain* id,
     IdMappingMode mode) const {
@@ -2033,14 +1935,11 @@ ComputeAtMap::getInputDisjointSetsOf(IterDomain* of_id, bool stop_at_rfactor) {
     if (!visited.emplace(currently_visiting).second) {
       continue;
     }
-    auto defs_it = unique_exact_definitions_.find(currently_visiting);
-    TORCH_INTERNAL_ASSERT(
-        defs_it != unique_exact_definitions_.end(),
-        "unique_exact_definitions_ wasn't correctly generated, missing the disjoint set:\n",
-        currently_visiting->toString());
+    auto defs_pair = id_graph_.iterDomainGroupDefinitions(
+        currently_visiting, IdMappingMode::EXACT);
 
     // If there's no definition, we've found an input.
-    if (defs_it->second.empty()) {
+    if (!defs_pair.second || defs_pair.first.empty()) {
       input_disjoint_sets.pushBack(currently_visiting);
       continue;
     }
@@ -2059,8 +1958,12 @@ ComputeAtMap::getInputDisjointSetsOf(IterDomain* of_id, bool stop_at_rfactor) {
     VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
         producers_of_currently_visiting;
 
-    for (auto def : defs_it->second) {
-      auto id_inps = ir_utils::filterByType<IterDomain>(def->inputs());
+    for (auto def_group : defs_pair.first) {
+      if (def_group->size() == 0) {
+        continue;
+      }
+      auto first_def = def_group->front();
+      auto id_inps = ir_utils::filterByType<IterDomain>(first_def->inputs());
       for (auto id_inp : id_inps) {
         producers_of_currently_visiting.pushBack(
             disjointSetOf(id_inp, IdMappingMode::EXACT));
@@ -2095,19 +1998,24 @@ ComputeAtMap::getAllDisjointSetProducers(
     if (!visited.pushBack(currently_visiting)) {
       continue;
     }
-    auto defs_it = unique_exact_definitions_.find(currently_visiting);
-    TORCH_INTERNAL_ASSERT(
-        defs_it != unique_exact_definitions_.end(),
-        "unique_exact_definitions_ wasn't correctly generated, missing the disjoint set:\n",
-        currently_visiting->toString());
+    auto defs_pair = id_graph_.iterDomainGroupDefinitions(
+        currently_visiting, IdMappingMode::EXACT);
+
+    if (!defs_pair.second) {
+      continue;
+    }
 
     // Traverse producers of current disjoint set and collect unique exact
     // disjoint set producers
     VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
         producers_of_currently_visiting;
 
-    for (auto def : defs_it->second) {
-      auto id_inps = ir_utils::filterByType<IterDomain>(def->inputs());
+    for (auto def_group : defs_pair.first) {
+      if (def_group->size() == 0) {
+        continue;
+      }
+      auto first_def = def_group->front();
+      auto id_inps = ir_utils::filterByType<IterDomain>(first_def->inputs());
       for (auto id_inp : id_inps) {
         producers_of_currently_visiting.pushBack(
             disjointSetOf(id_inp, IdMappingMode::EXACT));
@@ -2142,19 +2050,24 @@ ComputeAtMap::getAllDisjointSetConsumers(
     if (!visited.pushBack(currently_visiting)) {
       continue;
     }
-    auto uses_it = unique_exact_uses_.find(currently_visiting);
-    TORCH_INTERNAL_ASSERT(
-        uses_it != unique_exact_uses_.end(),
-        "unique_exact_uses_ wasn't correctly generated, missing the disjoint set:\n",
-        currently_visiting->toString());
+    auto uses_pair =
+        id_graph_.iterDomainGroupUses(currently_visiting, IdMappingMode::EXACT);
+
+    if (!uses_pair.second) {
+      continue;
+    }
 
     // Traverse consumers of current disjoint set and collect unique exact
     // disjoint set consumers
     VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
         consumers_of_currently_visiting;
 
-    for (auto uses : uses_it->second) {
-      auto id_outs = ir_utils::filterByType<IterDomain>(uses->outputs());
+    for (auto use_group : uses_pair.first) {
+      if (use_group->size() == 0) {
+        continue;
+      }
+      auto first_use = use_group->front();
+      auto id_outs = ir_utils::filterByType<IterDomain>(first_use->outputs());
       for (auto id_out : id_outs) {
         consumers_of_currently_visiting.pushBack(
             disjointSetOf(id_out, IdMappingMode::EXACT));
