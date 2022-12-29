@@ -98,6 +98,9 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   // Returns if a self mapping was detected that would invalidate assumptions of
   // the overall lowering system.
+  //
+  // TODO: Can we make this more of an alias analysis?
+  // Ref: https://github.com/csarofeen/pytorch/pull/1954#discussion_r961940498
   bool hasSelfMapping() const {
     return self_mapping_info_.has_value();
   }
@@ -109,7 +112,8 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // to produce mappings between from and to. If multiple iter domains in to map
   // to a single iter domain in from, the order of the iter domains in value of
   // the map is preserved to be the order provided in to.
-  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>> mapBetween(
+  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
+  buildMapBetween(
       const VectorOfUniqueEntries<IterDomain*>& from,
       const VectorOfUniqueEntries<IterDomain*>& to,
       IdMappingMode mode);
@@ -159,10 +163,6 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // is_view_rfactor_id, is_leaf_id and calls initializeID.
   void initialIdProcessing(Fusion* fusion);
 
-  // Maps sibling TensorViews that are outputs of expr. TensorView outputs must
-  // be replayed the same as eachother, so mapping them is very straightforward.
-  void mapMultiOutput(Expr* expr);
-
   // Map through loop swizzles, as input/output IterDomains are exact, only the
   // order they're traversed differs.
   void mapThroughLoopSwizzles(IdMappingMode mode);
@@ -171,23 +171,14 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // and first output of expr
   void buildExactMap(const std::vector<Expr*>& exprs);
 
-  // Fills disjoint_ids_[IdMappingMode::PERMISSIVE]. Initialize PermissiveMap as
-  // AlmostExact entries, then map through broadcasts
-  void buildPermissiveMap(const std::vector<Expr*>& exprs);
-
-  // Propagates forward then backward through all view like rfactor
-  // transformations to map cross view operations.
-  //
-  // TODO: This should be refactored to just process all IterDomain expressions
-  // between all Tv's root and rfactor domain. Although view is the only place
-  // this happens where there may be a significant perf implication. There's no
-  // reason we can't do this on all such transformations.
-  void mapRFactorExprs(Fusion* fusion);
-
   // Fills disjoint_ids_[IdMappingMode::ALMOSTEXACT]. Initialize AlmostExact as
   // Exact entries, then map anything that's either merged with a size-1 or
   // split by a size-1 dimension.
   void buildAlmostExactMap();
+
+  // Fills disjoint_ids_[IdMappingMode::PERMISSIVE]. Initialize PermissiveMap as
+  // AlmostExact entries, then map through broadcasts
+  void buildPermissiveMap(const std::vector<Expr*>& exprs);
 
   // Fills disjoint_ids_[IdMappingMode::LOOP] for relationships between inputs
   // and first output of expr

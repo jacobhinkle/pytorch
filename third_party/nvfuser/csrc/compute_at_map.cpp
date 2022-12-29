@@ -562,18 +562,14 @@ void IterDomainGraph::initializeId(
 
   if (is_leaf_id) {
     disjointIdsSet(IdMappingMode::LOOP).initializeSet(id);
-    if (id->definition() != nullptr) {
-      disjointExprsSet(IdMappingMode::LOOP).initializeSet(id->definition());
-    }
   }
-
   if (is_view_rfactor_id) {
     view_rfactor_ids_.emplace(id);
   }
 }
 
 std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
-IterDomainGraph::mapBetween(
+IterDomainGraph::buildMapBetween(
     const VectorOfUniqueEntries<IterDomain*>& from_ids,
     const VectorOfUniqueEntries<IterDomain*>& to_ids,
     IdMappingMode mode) {
@@ -747,75 +743,6 @@ void IterDomainGraph::initialIdProcessing(Fusion* fusion) {
   }
 }
 
-void IterDomainGraph::mapMultiOutput(Expr* expr) {
-  auto tv_outputs = ir_utils::filterByType<TensorView>(expr->outputs());
-  if (std::distance(tv_outputs.begin(), tv_outputs.end()) <= 1) {
-    // No multi TV outputs to map just return
-    return;
-  }
-
-  TensorView* first_output_tv = *tv_outputs.begin();
-  std::deque<TensorView*> other_tv_outputs(
-      tv_outputs.begin(), tv_outputs.end());
-  other_tv_outputs.pop_front();
-
-  for (auto other_tv_output : other_tv_outputs) {
-    // Map multi outputs of an expression to each other. c is current
-    // output, and f as first output. Keep consistent with the later section
-    // of producer and consumers. Which here producer is now "first output",
-    // and consumer is still consumer. One exception is how the
-    // domains left of CA positions are handled in the Parallel
-    // map. Those domains are not mapped in producer and consumer
-    // mappings as they do not share loops, but are mapped in the
-    // case of mapping multiple outputs since they do share the
-    // same loops.
-
-    TORCH_INTERNAL_ASSERT(
-        other_tv_output->getRootDomain().size() ==
-            first_output_tv->getRootDomain().size(),
-        "Multiple outputs with mismatched dimensions is not supported. ",
-        "Only supported case is welford op where all outputs tvs have idential domains.");
-    // other to first map
-    std::unordered_map<IterDomain*, IterDomain*> o2f;
-    for (const auto i : c10::irange(first_output_tv->getRootDomain().size())) {
-      o2f.insert(std::make_pair(
-          other_tv_output->getRootDomain()[i],
-          first_output_tv->getRootDomain()[i]));
-    }
-
-    // Multi output mapping, outputs are required to have the same domain
-    // and same transformations, so they can be mapped in permissive/exact,
-    // and when within compute at position of domain()->domain() in the
-    // parallel map.
-    auto replay_FasC = BestEffortReplay(
-        first_output_tv->domain()->domain(),
-        other_tv_output->domain()->domain(),
-        o2f);
-
-    // Map the entire replay map between the multiple
-    // consumers
-    auto c2f_disjoint_sets = replay_FasC.getIterDomainEquivalence();
-    for (auto disjoint_set : c2f_disjoint_sets.disjointSets()) {
-      if (disjoint_set->empty()) {
-        continue;
-      }
-      auto id0 = *disjoint_set->begin();
-      for (auto id1 : disjoint_set->vector()) {
-        mapIds(id0, id1, IdMappingMode::EXACT);
-      }
-    }
-
-    // Map all entries for the Loop map as they share the same loops.
-    for (auto f_id : first_output_tv->domain()->domain()) {
-      auto disjoint_set = c2f_disjoint_sets.getDisjointSetOf(f_id);
-      auto id0 = *(disjoint_set.begin());
-      for (auto id1 : disjoint_set) {
-        mapIds(id0, id1, IdMappingMode::LOOP);
-      }
-    }
-  }
-}
-
 namespace {
 //! Map corresponding inputs and outputs of swizzle op together
 //!  on the given disjoint set, if the given id is an output
@@ -862,6 +789,31 @@ void IterDomainGraph::buildExactMap(const std::vector<Expr*>& exprs) {
   for (auto expr : exprs) {
     TensorView* c_tv = ir_utils::getTvOutput(expr);
 
+    auto all_tv_outputs = ir_utils::filterByType<TensorView>(expr->outputs());
+
+    // Map siblings, as all other tv output domains must match the first tv
+    // outputs domain.
+    std::deque<TensorView*> other_tv_outputs(
+        all_tv_outputs.begin(), all_tv_outputs.end());
+    other_tv_outputs.pop_front();
+
+    for (auto other_tv_output : other_tv_outputs) {
+      // Sibling tv's must be exactly mapped with eachother so simply zip their
+      // leaf iter domains.
+
+      TORCH_INTERNAL_ASSERT(
+          other_tv_output->getRootDomain().size() ==
+              c_tv->getRootDomain().size(),
+          "Multiple outputs with mismatched TV domains is not supported.");
+
+      for (auto domain_i : c10::irange(c_tv->getRootDomain().size())) {
+        auto c_id = c_tv->getRootDomain()[domain_i];
+        auto o_id = other_tv_output->getRootDomain()[domain_i];
+        mapIds(o_id, c_id, IdMappingMode::EXACT);
+      }
+    }
+
+    // Map producer-consumer relationships based on the root domain map
     auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
     for (auto p_tv : tv_inputs) {
       // For exact mapings do not map any broadcast dimensions to
@@ -917,155 +869,6 @@ void IterDomainGraph::buildPermissiveMap(const std::vector<Expr*>& exprs) {
     }
   }
   mapThroughLoopSwizzles(IdMappingMode::PERMISSIVE);
-}
-
-void IterDomainGraph::mapRFactorExprs(Fusion* fusion) {
-  // Explicitly map through rfactor transformations, if we have an op like:
-  //
-  // T1[x, y*z] = view(T0[x*y, z])
-  // T3[x, y*z] = view(T2[x*y, z])
-  // T4 = T0 + T2
-  //
-  // We want to map T1 and T3's rfactor transformations together by playing
-  // the transformations forward since their root domains map. If instead we
-  // have:
-  //
-  // T1[x, y*z] = view(T0[x*y, z])
-  // T3[x, y*z] = view(T2[x*y, z])
-  // T4 = T1 + T3
-  //
-  // Then we wouldn't have a mapping of T1 and T3's root domain, we'd have a
-  // mapping of their rfactor domain, so we would want to map T1 and T3's
-  // rfactor transformations starting at their rfactor domains.
-  //
-  // Therefore we'll explicitly map rfactor transformation iteration domains
-  // forward and backwards. Something similar could happen with rfactor of
-  // root domains, though it seems mapping rfactor reduction domains aren't
-  // that important. Mapping view transformations is more important since view
-  // is part of the compute definition so having the map through the
-  // transformations makes it easy to check if different view operations are
-  // consistent with eachother.
-
-  auto all_tvs = ir_utils::allTvs(fusion);
-  std::vector<TensorView*> all_consumer_tvs;
-  std::copy_if(
-      all_tvs.begin(),
-      all_tvs.end(),
-      std::back_inserter(all_consumer_tvs),
-      [](TensorView* tv) { return !tv->isFusionInput() && tv->hasRFactor(); });
-
-  // IterDomains could have multiple uses defined in the fusion if multiple
-  // transformations were redefined (more than one transform propagation pass
-  // was run and retransformed sections of the graph). We're going to make a
-  // new uses map so we can easily process the actual uses of IterDomains. We
-  // actually only need rfactor uses for this section of mapping, so we'll
-  // limit this map to only rfactor transformations.
-  std::unordered_map<IterDomain*, Expr*> rfactor_id_uses;
-
-  // Order of traversal is important for processing all the rfactor ids as the
-  // first pass will go forward through expressions and the second pass will
-  // traverse backwards through them. ID's will be unique in this vector,
-  // enforced when building it since it's built with rfactor_id_uses.
-  std::vector<IterDomain*> rfactor_id_order;
-
-  // Grab all the rfactor ids.
-  for (auto consumer_tv : all_consumer_tvs) {
-    auto exprs = StmtSort::getExprs(
-        fusion,
-        {consumer_tv->getMaybeRFactorDomain().begin(),
-         consumer_tv->getMaybeRFactorDomain().end()});
-    for (auto expr : exprs) {
-      auto rfactor_inp_ids = ir_utils::filterByType<IterDomain>(expr->inputs());
-      TORCH_INTERNAL_ASSERT(
-          expr->isA<Split>() || expr->isA<Merge>(),
-          "Wasn't expecting the expression type of:\n",
-          expr->toString(),
-          "\nto be an expression defined in an rfactor transformation.");
-      for (auto rfactor_inp_id : rfactor_inp_ids) {
-        TORCH_INTERNAL_ASSERT(
-            rfactor_id_uses.find(rfactor_inp_id) == rfactor_id_uses.end(),
-            "Was expecting iter domains to only have one active transformation but found id ",
-            rfactor_inp_id->toString(),
-            " used in\n",
-            rfactor_id_uses.at(rfactor_inp_id),
-            "\nand\n",
-            expr->toString());
-        rfactor_id_uses.emplace(std::make_pair(rfactor_inp_id, expr));
-        rfactor_id_order.push_back(rfactor_inp_id);
-      }
-    }
-    for (auto rfactor_id : consumer_tv->getMaybeRFactorDomain()) {
-      if (rfactor_id->isRFactorProduct()) {
-        rfactor_id_uses.emplace(std::make_pair(rfactor_id, nullptr));
-        rfactor_id_order.push_back(rfactor_id);
-      }
-    }
-  }
-
-  // if prop_forward we're going forward through transformations and
-  // expressions, meaning if inputs of expressions map then we map their
-  // outputs, otherwise we're traversing backwards, meaning if outputs of
-  // expressions map then we map their inputs.
-  for (auto prop_forward : {true, false}) {
-    std::unordered_set<Expr*> visited_exprs;
-
-    for (auto rfactor_id_i : c10::irange(rfactor_id_order.size())) {
-      auto first_rfactor_id = prop_forward
-          ? rfactor_id_order[rfactor_id_i]
-          : rfactor_id_order[rfactor_id_order.size() - 1 - rfactor_id_i];
-
-      // At should be safe since we made rfactor_id_order and rfactor_id_uses
-      // at the same time so they should have the same exact entries.
-      auto first_expr = prop_forward ? rfactor_id_uses.at(first_rfactor_id)
-                                     : first_rfactor_id->definition();
-
-      if (first_expr == nullptr) {
-        continue;
-      }
-
-      if (visited_exprs.find(first_expr) != visited_exprs.end()) {
-        continue;
-      }
-      visited_exprs.emplace(first_expr);
-
-      // Only need to be concerned here with mapping across rfactor iter
-      // domains, so isolate out those.
-      auto all_exact_map_ids = disjointIdsSet(IdMappingMode::EXACT)
-                                   .getDisjointSetOf(first_rfactor_id);
-      std::vector<IterDomain*> exact_map_rf_ids;
-      std::copy_if(
-          all_exact_map_ids.vector().begin(),
-          all_exact_map_ids.vector().end(),
-          std::back_inserter(exact_map_rf_ids),
-          [](IterDomain* id) { return id->isRFactorProduct(); });
-
-      for (auto exact_map_rf_id : exact_map_rf_ids) {
-        if (exact_map_rf_id == first_rfactor_id) {
-          continue;
-        }
-        // If there's an input with an rfactor domain we could have an exact
-        // mapped rfactor id that's on the input meaning it wouldn't have an
-        // entry in rfactor_id_uses
-        auto other_use =
-            rfactor_id_uses.find(exact_map_rf_id) == rfactor_id_uses.end()
-            ? nullptr
-            : rfactor_id_uses.at(exact_map_rf_id);
-        auto other_expr =
-            prop_forward ? other_use : exact_map_rf_id->definition();
-
-        if (other_expr == nullptr) {
-          continue;
-        }
-
-        if (visited_exprs.find(other_expr) != visited_exprs.end()) {
-          continue;
-        }
-
-        mapThroughExpr(
-            first_expr, other_expr, prop_forward, IdMappingMode::EXACT);
-      }
-    }
-  }
 }
 
 void IterDomainGraph::buildAlmostExactMap() {
@@ -1153,6 +956,11 @@ void IterDomainGraph::buildLoopMap(const std::vector<Expr*>& exprs) {
 
     auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
     for (auto p_tv : tv_inputs) {
+      // Fusion inputs aren't involved in loop generation.
+      if(p_tv->isFusionInput()){
+        continue;
+      }
+
       // IterDomains from producer that may match with those in the first
       // consumer
       std::vector<IterDomain*> p_ca_domain(
@@ -1161,6 +969,14 @@ void IterDomainGraph::buildLoopMap(const std::vector<Expr*>& exprs) {
 
       // If producer is compute with the consumer, extend the matching domain to
       // the compute with of the producer.
+      //
+      // This shouldn't actually exist until after the compute at map is built
+      // because it requires expression sorting to be run. To actually handle
+      // this IterDomainGraph::updateComputeWith is being run after expression
+      // sorting which can resolve the compute with of tensors.
+      //
+      // I'm leaving this in here as if we could resolve that before we build
+      // the IterDomainGraph it's easy to handle here.
       if (p_tv->hasResolvedComputeWith()) {
         auto with_tvs = p_tv->getComputeWithConsumers();
         if (std::find(with_tvs.begin(), with_tvs.end(), c_tv) !=
@@ -1211,24 +1027,9 @@ void IterDomainGraph::build(Fusion* fusion) {
       std::back_inserter(tv_exprs),
       [](Expr* expr) { return ir_utils::isTvOp(expr); });
 
-  for (auto expr : tv_exprs) {
-    // Connect multi-output expressions as they're trivial to connect.
-    mapMultiOutput(expr);
-  }
-
   buildExactMap(tv_exprs);
-  // Map forward and backward through TV root<->rfactor to cross map
-  // connections that are not explicitly defined through input<->output
-  // expression maps.
-  //
-  // Updates both permissive and exact mapping, must be done after exact and
-  // permissive maps are built but before we copy the exact map for the almost
-  // exact map.
-  mapRFactorExprs(fusion);
-
   buildAlmostExactMap();
   buildPermissiveMap(tv_exprs);
-  buildAlmostExactMap();
   buildLoopMap(tv_exprs);
 
   // Debug, make sure there's no self mapping in TensorView's during lowering
@@ -1685,16 +1486,16 @@ void ComputeAtMap::buildConsumersMap() {
 
     for (auto consumer : consumers) {
       auto all_consumer_ids = ir_utils::allIDsOf(consumer);
-      // Change data structure for IterDomainGraph::mapBetween
+      // Change data structure for IterDomainGraph::buildMapBetween
       VectorOfUniqueEntries<IterDomain*> consumer_ids(
           all_consumer_ids.begin(), all_consumer_ids.end());
       for (auto producer : producers) {
         auto all_producer_ids = ir_utils::allIDsOf(producer);
-        // Change data structure for IterDomainGraph::mapBetween
+        // Change data structure for IterDomainGraph::buildMapBetween
         VectorOfUniqueEntries<IterDomain*> producer_ids(
             all_producer_ids.begin(), all_producer_ids.end());
 
-        auto p2c = id_graph_.mapBetween(
+        auto p2c = id_graph_.buildMapBetween(
             producer_ids, consumer_ids, IdMappingMode::PERMISSIVE);
 
         consumers_map_.insert(p2c.begin(), p2c.end());
