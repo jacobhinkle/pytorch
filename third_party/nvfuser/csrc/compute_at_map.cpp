@@ -13,60 +13,34 @@ namespace torch {
 namespace jit {
 namespace fuser {
 namespace cuda {
-namespace {
 
-// Is the provided IterDomain an Leaf of provided TensorView and within its
-// computeAtPosition.
-// If outside computeAt axis, we don't want to directly map consumer/producer in
-// the loop mapping as they are not sharing the same loop.
-bool idIsAComputeAtLeafDomain(
-    IterDomain* id,
-    TensorView* producer_tv,
-    TensorView* consumer_tv) {
-  auto begin = producer_tv->domain()->domain().begin();
-  auto end = producer_tv->domain()->domain().begin() +
-      producer_tv->getComputePosition(consumer_tv);
-  return std::find(begin, end, id) != end;
-}
-
-// Is the provided IterDomain an Leaf of provided TensorView
-bool idIsALeafDomain(IterDomain* id, TensorView* tv) {
-  auto begin = tv->domain()->domain().begin();
-  auto end = tv->domain()->domain().end();
-  return std::find(begin, end, id) != end;
-}
-
-} // namespace
-
-IterDomainGraph::IterDomainGraph(Fusion* fusion, bool allow_self_mapping) {
-  // Initialize the required sets as if a permissive relationship is never
-  // found, then querying an empty permissive map will fail later.
-  std::vector<IdMappingMode> mapping_types{
-      IdMappingMode::EXACT,
-      IdMappingMode::ALMOSTEXACT,
-      IdMappingMode::PERMISSIVE,
-      IdMappingMode::LOOP};
-
-  // Initialize disjoint sets
-  for (auto mode : mapping_types) {
-    disjoint_ids_[mode] = DisjointSets<IterDomain*>();
-    disjoint_exprs_[mode] = DisjointSets<Expr*>();
-  }
-
-  build(fusion);
+IterDomainGraph::IterDomainGraph(
+    const std::vector<Expr*>& exprs,
+    bool allow_self_mapping) {
+  build(exprs, {});
 
   if (!allow_self_mapping) {
-    TORCH_INTERNAL_ASSERT(
-        !hasSelfMapping(),
-        "Unsupported domain mapping detected in ",
-        std::get<0>(*self_mapping_info_)->toString(),
-        ". ",
-        std::get<3>(*self_mapping_info_),
-        " domains, ",
-        std::get<1>(*self_mapping_info_)->toString(),
-        " and ",
-        std::get<2>(*self_mapping_info_)->toString(),
-        ", are mapped with each other.");
+    assertNoSelfMapping();
+  }
+}
+
+IterDomainGraph::IterDomainGraph(Fusion* fusion, bool allow_self_mapping) {
+  std::vector<TensorView*> inputs_and_outputs;
+  {
+    auto inp_tvs = ir_utils::filterByType<TensorView>(fusion->inputs());
+    inputs_and_outputs.insert(
+        inputs_and_outputs.begin(), inp_tvs.begin(), inp_tvs.end());
+  }
+  {
+    auto out_tvs = ir_utils::filterByType<TensorView>(fusion->outputs());
+    inputs_and_outputs.insert(
+        inputs_and_outputs.begin(), out_tvs.begin(), out_tvs.end());
+  }
+
+  build(fusion->exprs(), inputs_and_outputs);
+
+  if (!allow_self_mapping) {
+    assertNoSelfMapping();
   }
 }
 
@@ -150,6 +124,14 @@ DisjointSets<Expr*>& IterDomainGraph::disjointExprsSet(IdMappingMode mode) {
       mode,
       " not supported.");
   return disjoint_exprs_it->second;
+}
+
+Expr* IterDomainGraph::idUse(IterDomain* id) const {
+  auto use_it = id_uses_.find(id);
+  if (use_it == id_uses_.end()) {
+    return nullptr;
+  }
+  return use_it->second;
 }
 
 bool IterDomainGraph::exprsMap(
@@ -431,6 +413,20 @@ bool IterDomainGraph::mapThroughExpr(
   return true;
 }
 
+void IterDomainGraph::assertNoSelfMapping() {
+  TORCH_INTERNAL_ASSERT(
+      !hasSelfMapping(),
+      "Unsupported domain mapping detected in ",
+      std::get<0>(*self_mapping_info_)->toString(),
+      ". ",
+      std::get<3>(*self_mapping_info_),
+      " domains, ",
+      std::get<1>(*self_mapping_info_)->toString(),
+      " and ",
+      std::get<2>(*self_mapping_info_)->toString(),
+      ", are mapped with each other.");
+}
+
 namespace {
 
 // Returns the first pair of id's in ids detected to match eachother on the
@@ -487,8 +483,10 @@ c10::optional<std::pair<IterDomain*, IterDomain*>> detectMappablePair(
 // possible to lift this assumption, but it's unclear if it could
 // matter in practice.
 c10::optional<std::tuple<TensorView*, IterDomain*, IterDomain*, std::string>>
-findFirstSelfMapping(Fusion* fusion, const IterDomainGraph& id_graph) {
-  for (auto tv : ir_utils::allTvs(fusion)) {
+findFirstSelfMapping(
+    const std::vector<TensorView*>& all_tvs,
+    const IterDomainGraph& id_graph) {
+  for (auto tv : all_tvs) {
     // For each tensor, make sure root, rfactor and leaf domains
     // should not include domains that are mapped with another domain
     // in the same set of domains. This may be overly conservative,
@@ -563,6 +561,7 @@ void IterDomainGraph::initializeId(
   if (is_leaf_id) {
     disjointIdsSet(IdMappingMode::LOOP).initializeSet(id);
   }
+
   if (is_view_rfactor_id) {
     view_rfactor_ids_.emplace(id);
   }
@@ -570,9 +569,9 @@ void IterDomainGraph::initializeId(
 
 std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
 IterDomainGraph::buildMapBetween(
-    const VectorOfUniqueEntries<IterDomain*>& from_ids,
-    const VectorOfUniqueEntries<IterDomain*>& to_ids,
-    IdMappingMode mode) {
+    const std::vector<IterDomain*>& from_ids,
+    const std::vector<IterDomain*>& to_ids,
+    IdMappingMode mode) const {
   std::unordered_map<
       IterDomain*,
       std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
@@ -625,6 +624,14 @@ IterDomainGraph::buildMapBetween(
     from_ids2to_ids[from_id] = to_entry_it->second;
   }
   return from_ids2to_ids;
+}
+
+std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
+IterDomainGraph::buildMapBetween(
+    const VectorOfUniqueEntries<IterDomain*>& from_ids,
+    const VectorOfUniqueEntries<IterDomain*>& to_ids,
+    IdMappingMode mode) const {
+  return buildMapBetween(from_ids.vector(), to_ids.vector(), mode);
 }
 
 std::pair<
@@ -681,9 +688,9 @@ IterDomainGraph::iterDomainGroupUses(
   return std::make_pair(uses_it->second, true);
 }
 
-void IterDomainGraph::buildIterDomainUses(Fusion* fusion) {
-  // Generate IterDomain uses:
-  for (auto tv : ir_utils::allTvs(fusion)) {
+void IterDomainGraph::buildIterDomainUses(
+    const std::vector<TensorView*>& all_tvs) {
+  for (auto tv : all_tvs) {
     auto all_ids = ir_utils::allIDsOf(tv);
     for (auto id : all_ids) {
       if (id_uses_.find(id) == id_uses_.end()) {
@@ -713,10 +720,11 @@ void IterDomainGraph::buildIterDomainUses(Fusion* fusion) {
   }
 }
 
-void IterDomainGraph::initialIdProcessing(Fusion* fusion) {
+void IterDomainGraph::initialIdProcessing(
+    const std::vector<TensorView*>& all_tvs) {
   // Initialize entries for every iteration domain and mark view like
   // iteration domains and leaf iteration domains.
-  for (auto tv : ir_utils::allTvs(fusion)) {
+  for (auto tv : all_tvs) {
     const auto& domain = tv->domain()->domain();
     auto all_ids = ir_utils::allIDsOf(tv);
 
@@ -742,33 +750,6 @@ void IterDomainGraph::initialIdProcessing(Fusion* fusion) {
     }
   }
 }
-
-namespace {
-//! Map corresponding inputs and outputs of swizzle op together
-//!  on the given disjoint set, if the given id is an output
-//!  of a swizzle operator.
-//!
-//! The current usage of swizzle operator is local to each tensor
-//!  itself, so they should not affect exact or permissive mapping
-//!  between iterdomains on different tensor domains.
-//! TODO:
-//!   Exact mapping based index hoisting of swizzled iterdomains
-//!   is disabled currently and will be re-enabled in the next
-//!   few build out steps.
-void mapMaybeSwizzleOp(
-    DisjointSets<IterDomain*>& disjoint_sets,
-    IterDomain* id) {
-  if (auto swizzle_2d = dynamic_cast<Swizzle2D*>(id->definition())) {
-    // Map each input to its corresponding output on the given
-    // disjoint set if this is a loop swizzle. Loop swizzles don't impact
-    // indexing, only iteration order.
-    if (swizzle_2d->swizzleMode() == SwizzleMode::Loop) {
-      disjoint_sets.mapEntries(swizzle_2d->inX(), swizzle_2d->outX());
-      disjoint_sets.mapEntries(swizzle_2d->inY(), swizzle_2d->outY());
-    }
-  }
-}
-} // namespace
 
 void IterDomainGraph::mapThroughLoopSwizzles(IdMappingMode mode) {
   for (auto use_it : id_uses_) {
@@ -957,7 +938,7 @@ void IterDomainGraph::buildLoopMap(const std::vector<Expr*>& exprs) {
     auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
     for (auto p_tv : tv_inputs) {
       // Fusion inputs aren't involved in loop generation.
-      if(p_tv->isFusionInput()){
+      if (p_tv->isFusionInput()) {
         continue;
       }
 
@@ -1008,24 +989,53 @@ void IterDomainGraph::buildLoopMap(const std::vector<Expr*>& exprs) {
   }
 }
 
-void IterDomainGraph::build(Fusion* fusion) {
-  FusionGuard fg(fusion);
+void IterDomainGraph::build(
+    const std::vector<Expr*>& exprs,
+    const std::vector<TensorView*>& additional_tvs) {
+  // Initialize the required sets as if a permissive relationship is never
+  // found, then querying an empty permissive map will fail later.
+  std::vector<IdMappingMode> mapping_types{
+      IdMappingMode::EXACT,
+      IdMappingMode::ALMOSTEXACT,
+      IdMappingMode::PERMISSIVE,
+      IdMappingMode::LOOP};
 
-  // Add uses to all iter domains.
-  buildIterDomainUses(fusion);
+  // Initialize disjoint sets
+  for (auto mode : mapping_types) {
+    disjoint_ids_[mode] = DisjointSets<IterDomain*>();
+    disjoint_exprs_[mode] = DisjointSets<Expr*>();
+  }
 
-  // Initialize the maps with all the IterDomains defined in the fusion.
-  initialIdProcessing(fusion);
-
-  // Filter non-TensorView expressions
-  auto all_exprs = fusion->exprs();
   std::vector<Expr*> tv_exprs;
 
   std::copy_if(
-      all_exprs.begin(),
-      all_exprs.end(),
-      std::back_inserter(tv_exprs),
-      [](Expr* expr) { return ir_utils::isTvOp(expr); });
+      exprs.begin(), exprs.end(), std::back_inserter(tv_exprs), [](Expr* expr) {
+        return ir_utils::isTvOp(expr);
+      });
+
+  auto all_tvs = ir_utils::allTvsOfExprs(tv_exprs);
+  if (additional_tvs.size() > 0) {
+    std::unordered_set<TensorView*> all_added_tvs(
+        all_tvs.begin(), all_tvs.end());
+    for (auto additional_tv : additional_tvs) {
+      if (all_added_tvs.find(additional_tv) == all_added_tvs.end()) {
+        all_tvs.push_back(additional_tv);
+      }
+    }
+  }
+
+  if (all_tvs.empty()) {
+    return;
+  }
+
+  FusionGuard fg(all_tvs.front()->fusion());
+
+  // Add uses to all iter domains.
+  buildIterDomainUses(all_tvs);
+
+  // Initialize the maps with all the IterDomains used in the provded
+  // expressions.
+  initialIdProcessing(all_tvs);
 
   buildExactMap(tv_exprs);
   buildAlmostExactMap();
@@ -1034,7 +1044,7 @@ void IterDomainGraph::build(Fusion* fusion) {
 
   // Debug, make sure there's no self mapping in TensorView's during lowering
   // that would invalidate lowering assumptions.
-  self_mapping_info_ = findFirstSelfMapping(fusion, *this);
+  self_mapping_info_ = findFirstSelfMapping(all_tvs, *this);
 }
 
 void IterDomainGraph::copyGraph(
@@ -1046,6 +1056,7 @@ void IterDomainGraph::copyGraph(
 
   disjointIdsSet(to_mode) = disjointIdsSet(from_mode);
   disjointExprsSet(to_mode) = disjointExprsSet(from_mode);
+
   unique_definitions_[to_mode] = {};
   unique_uses_[to_mode] = {};
 
@@ -1552,51 +1563,6 @@ void ComputeAtMap::buildConcreteIds() {
   }
 }
 
-bool ComputeAtMap::areExactExprs(Expr* expr_1, Expr* expr_2) {
-  if (typeid(*expr_1) != typeid(*expr_2)) {
-    return false;
-  }
-
-  if (expr_1->isA<Swizzle2D>()) {
-    auto swizzle_1 = expr_1->as<Swizzle2D>();
-    auto swizzle_2 = expr_2->as<Swizzle2D>();
-    if (swizzle_1->swizzleType() != swizzle_2->swizzleType() ||
-        swizzle_1->swizzleMode() != swizzle_2->swizzleMode()) {
-      return false;
-    }
-  }
-
-  TORCH_INTERNAL_ASSERT(
-      expr_1->inputs().size() == expr_2->inputs().size() &&
-          expr_1->outputs().size() == expr_2->outputs().size(),
-      "Expr traversal doesn't support variable number of inputs and outputs.");
-
-  for (auto input_i : c10::irange(expr_1->inputs().size())) {
-    if (expr_1->inputs()[input_i]->isA<IterDomain>() &&
-        !areMapped(
-            expr_1->inputs()[input_i]->as<IterDomain>(),
-            expr_2->inputs()[input_i]->as<IterDomain>(),
-            IdMappingMode::EXACT)) {
-      // Inputs don't exact map in the right order
-      return false;
-    }
-  }
-
-  for (auto output_i : c10::irange(expr_1->outputs().size())) {
-    if (expr_1->outputs()[output_i]->isA<IterDomain>() &&
-        !areMapped(
-            expr_1->outputs()[output_i]->as<IterDomain>(),
-            expr_2->outputs()[output_i]->as<IterDomain>(),
-            IdMappingMode::EXACT)) {
-      // Outputs don't exact map in the right order
-      return false;
-    }
-  }
-  // Expr's have exact mapped inputs and outputs, including parameters of the
-  // transformation.
-  return true;
-}
-
 IterDomain* ComputeAtMap::getConcreteMappedID(
     IterDomain* id,
     IdMappingMode mode) const {
@@ -1627,7 +1593,7 @@ std::string idGraphDisjointIdSetToString(
   std::stringstream ss;
   // Sort vectors before printing so that the resulting output is
   // printed deterministically
-  auto disjoint_sets = ca_map.getIdSets(mode).disjointSets();
+  auto disjoint_sets = ca_map.idGraph().getDisjointIdSets(mode).disjointSets();
   std::sort(
       disjoint_sets.begin(),
       disjoint_sets.end(),
@@ -1666,6 +1632,7 @@ std::string idGraphDisjointIdSetToString(
 
 } // namespace
 
+// TODO: This should be on IterDomainGraph
 std::string ComputeAtMap::toString() const {
   std::stringstream ss;
   ss << "Compute at map { \n";
@@ -1700,23 +1667,15 @@ std::vector<IterDomain*> ComputeAtMap::getViewRfactorDomainsOfIdGroup(
   return rfactor_ids;
 }
 
-const std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>& ComputeAtMap::
+const std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> ComputeAtMap::
     disjointSetOf(IterDomain* id, IdMappingMode mode) const {
+  auto disjoint_set_pair = id_graph_.getDisjointIdSet(id, mode);
   TORCH_INTERNAL_ASSERT(
-      idExistsInMap(id),
+      disjoint_set_pair.second,
       id->toString(),
-      " has not been processed in this Compute At Map, yet the disjoint set for it was requested.");
-  return getIdSets(mode).disjointSetMap().at(id);
-}
-
-const DisjointSets<IterDomain*>& ComputeAtMap::getIdSets(
-    IdMappingMode mode) const {
-  return id_graph_.getDisjointIdSets(mode);
-}
-
-bool ComputeAtMap::idExistsInMap(IterDomain* id) const {
-  return getIdSets(IdMappingMode::EXACT).disjointSetMap().find(id) !=
-      getIdSets(IdMappingMode::EXACT).disjointSetMap().end();
+      " has not been processed in this Compute At Map, yet the disjoint set for it was requested in mode: ",
+      mode);
+  return disjoint_set_pair.first;
 }
 
 VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>

@@ -461,7 +461,7 @@ bool isConnectedFusionGraph(Fusion* fusion) {
   return true;
 }
 
-// Returns if a fusion cannot transformed into a consistent format since we
+// Returns if a fusion cannot be transformed into a consistent format since we
 // can't transform forward through view operations, for exmaple:
 //
 // tv0[I0, I1, I2]
@@ -475,126 +475,60 @@ bool isConnectedFusionGraph(Fusion* fusion) {
 //
 // Returns true if a scenario like above is found in the fusion.
 bool requiresForwardViewReplay(Fusion* fusion, ComputeAtMap& ca_map) {
-  // Track the uses of the rfactor domains in the fusion. If an rfactor domain
-  // is used in more than one way it means the above situation is being
-  // encountered.
+  // If exact mapped rfactor domains are used in more than one way it means the
+  // above situation is being encountered.
   //
   // tv1 root: [I0rf, I1rf, I2] -> rfactor [I0*I1rf, I2]
   // tv1 root: [I0, I1rf, I2rf] -> rfactor [I0, I1*I2rf]
-  //
-  // Here we can see I1rf is used in two view transformations, one to I0*I1rf,
-  // and the other to I1*I2rf.
-
-  // Track the transformation each exact disjoint rfactor set is used in. If
-  // more than one is detected we can't support transforming the fusion into a
-  // consistent format.
-  std::unordered_map<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>, Expr*>
-      unique_exact_uses;
-
-  // Don't check compute uses directly, as IterDomain->uses() isn't protected
-  // from going outside the TensorViews between registered inputs and outputs of
-  // the fusion. If there are view operations defined in the fusion container
-  // (because of how segmentation works) but not between registered input and
-  // outputs, that could be picked up as inconsistent view transformations.
-  //
-  // It would be unlikely this would be picked up as a conflict as we check
-  // which definitions were registered in the compute at map for matching
-  // transformations. However, we may want to support scheduling after
-  // transformations which could map to those views not on the input->output
-  // path.
-
-  // Look through all definitions associated with producing rfactor outputs.
-  // Mark those as an active use of the rfactor, if two are detected, return
-  // true.
   for (const auto& disjoint_set_shared_ptr :
        ca_map.idGraph()
            .getDisjointIdSets(IdMappingMode::EXACT)
            .disjointSets()) {
+    std::vector<IterDomain*> rfactor_ids;
+
+    std::copy_if(
+        disjoint_set_shared_ptr->vector().begin(),
+        disjoint_set_shared_ptr->vector().end(),
+        std::back_inserter(rfactor_ids),
+        [&](IterDomain* id) {
+          return id->isRFactorProduct() &&
+              ca_map.idGraph().idUse(id) != nullptr;
+        });
+
     // Make sure there's at least one rfactor domain in the set, otherwise we
     // don't need to check anything from this set.
-    if (!std::any_of(
-            disjoint_set_shared_ptr->vector().begin(),
-            disjoint_set_shared_ptr->vector().end(),
-            [](IterDomain* id) { return id->isRFactorProduct(); })) {
+    if (rfactor_ids.empty()) {
       continue;
     }
 
-    auto defs_pair = ca_map.idGraph().iterDomainGroupDefinitions(
-        disjoint_set_shared_ptr, IdMappingMode::EXACT);
+    auto first_use = ca_map.idGraph().idUse(rfactor_ids.front());
+    auto first_use_pair =
+        ca_map.idGraph().getDisjointExprSet(first_use, IdMappingMode::EXACT);
 
-    // Iterate through the all the rfactor iter domains
-    for (auto id_rfactor_product : disjoint_set_shared_ptr->vector()) {
-      if (!id_rfactor_product->isRFactorProduct()) {
+    TORCH_INTERNAL_ASSERT(
+        first_use_pair.second,
+        "IterDomainGraph not correctly built, could not find ",
+        first_use->toString());
+
+    for (auto other_id : rfactor_ids) {
+      auto other_use = ca_map.idGraph().idUse(other_id);
+      if (other_use == first_use) {
         continue;
       }
 
-      // Grab the rfactor definition
-      auto rfactor_def = id_rfactor_product->definition();
+      auto other_use_pair =
+          ca_map.idGraph().getDisjointExprSet(other_use, IdMappingMode::EXACT);
 
-      if (rfactor_def == nullptr) {
-        // Guard segfault if there isn't a definition for this iter domain
-        continue;
-      }
-
-      // If one output of the expression is an rfactor ID all of them should be
-      auto def_outs =
-          ir_utils::filterByType<IterDomain>(rfactor_def->outputs());
       TORCH_INTERNAL_ASSERT(
-          std::all_of(
-              def_outs.begin(),
-              def_outs.end(),
-              [](IterDomain* id) { return id->isRFactorProduct(); }),
-          "This function does not support outputs of transformations with mismatching rfactor flags. ",
-          "If one output is rfactor all should be rfactor.");
+          other_use_pair.second,
+          "IterDomainGraph not correctly built, could not find ",
+          other_use->toString());
 
-      // If outputs are rfactor all the inputs should be as well. It doesn't
-      // make sense to have transforms on non-rfactor domains that produce
-      // rfactor domains.
-      auto def_inps = ir_utils::filterByType<IterDomain>(rfactor_def->inputs());
-      TORCH_INTERNAL_ASSERT(
-          std::all_of(
-              def_inps.begin(),
-              def_inps.end(),
-              [](IterDomain* id) { return id->isRFactorProduct(); }),
-          "Inputs producing an rfactor domain, should be marked as rfactor but found:\n  ",
-          rfactor_def->toString());
-
-      // Check which definition in the unique exact definition set this
-      // definition matches to:
-      for (auto def_group : defs_pair.first) {
-        auto first_def_in_group = def_group->front();
-        if (ca_map.areExactExprs(rfactor_def, first_def_in_group)) {
-          // Check if we already have an expression that consumes an
-          // equivalent of any of the input rfactor domains. If so and it's
-          // not the already registered transformation, return true
-          for (auto inp : def_inps) {
-            auto inp_disjoint_set =
-                ca_map.disjointSetOf(inp, IdMappingMode::EXACT);
-            // Initialize the use entry for this set (if it doesn't already
-            // exist)
-            if (unique_exact_uses.find(inp_disjoint_set) ==
-                unique_exact_uses.end()) {
-              unique_exact_uses[inp_disjoint_set] = nullptr;
-            }
-
-            if (unique_exact_uses.at(inp_disjoint_set) == nullptr) {
-              // If expression is null pointer register this first_def_in_group
-              unique_exact_uses[inp_disjoint_set] = first_def_in_group;
-            } else if (!ca_map.areExactExprs(
-                           unique_exact_uses[inp_disjoint_set],
-                           first_def_in_group)) {
-              // Two transformations that don't match on matching rfactor
-              // domains found, return true.
-              return true;
-            }
-          }
-          // Expression already mapped, stop trying to match expressions
-          break;
-        }
+      if (first_use_pair.first != other_use_pair.first) {
+        return true;
       }
     }
   }
-  // No inconsistent rfactor uses found, we can safely transform this graph.
   return false;
 }
 
@@ -1972,7 +1906,8 @@ bool checkCanSchedule(
     if (!isConnectedFusionGraph(fusion)) {
       return false;
     }
-    if (IterDomainGraph(fusion, /*allow_self_mapping=*/true).hasSelfMapping()) {
+    if (IterDomainGraph(fusion->exprs(), /*allow_self_mapping=*/true)
+            .hasSelfMapping()) {
       return false;
     }
     if (!SchedulerType::canScheduleCompileTime(fusion)) {

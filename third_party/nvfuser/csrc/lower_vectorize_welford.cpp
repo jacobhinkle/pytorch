@@ -94,14 +94,19 @@ class WelfordVectorizer : public kir::ExprMutator {
     // ID. Technically, predicate hoisting is legal as long as this
     // loop is produced only with divisible splits, but for now only
     // enable when it's mapped with a vectorized ID.
-    const auto& exact_set = GpuLower::current()
-                                ->caMap()
-                                ->getIdSets(IdMappingMode::EXACT)
-                                .getDisjointSetOf(innermost_leaf_id);
+    auto exact_set =
+        GpuLower::current()
+            ->caMap()
+            ->idGraph()
+            .getDisjointIdSet(innermost_leaf_id, IdMappingMode::EXACT)
+            .first;
     // If none of IterDomains is vectorized, don't vectorize the WelfordOp
-    if (std::none_of(exact_set.begin(), exact_set.end(), [&](IterDomain* id) {
-          return id->getParallelType() == ParallelType::Vectorize;
-        })) {
+    if (std::none_of(
+            exact_set->vector().begin(),
+            exact_set->vector().end(),
+            [&](IterDomain* id) {
+              return id->getParallelType() == ParallelType::Vectorize;
+            })) {
       return false;
     }
 

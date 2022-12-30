@@ -72,45 +72,21 @@ std::unordered_set<Split*> getAllDivisibleSplits(
     return all_divisible_splits;
   }
 
-  // Track the concrete id in the exact map of the outer output of the split
-  // expressions. This is how we'll check if there are matching splits. This
-  // also gets rid of any splits that already match (for processing).
-  std::unordered_map<IterDomain*, Expr*> outer_concrete_id_to_expr;
+  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>
+      all_mapped_disjoint_expr_sets;
 
-  for (auto split : all_divisible_splits) {
-    outer_concrete_id_to_expr[ca_map->getConcreteMappedID(
-        split->outer(), IdMappingMode::EXACT)] = split;
+  for (auto divisible_split : all_divisible_splits) {
+    auto set_pair = ca_map->idGraph().getDisjointExprSet(
+        divisible_split, IdMappingMode::ALMOSTEXACT);
+    if (set_pair.second) {
+      all_mapped_disjoint_expr_sets.pushBack(set_pair.first);
+    }
   }
 
-  std::unordered_set<Expr*> visited(
-      all_divisible_splits.begin(), all_divisible_splits.end());
-
-  // Find splits that match what we already have:
-  for (auto entry : outer_concrete_id_to_expr) {
-    auto concrete_id = entry.first;
-    auto original_view_split = entry.second;
-
-    const auto& exact_mapped_ids = ca_map->idGraph()
-                                       .getDisjointIdSets(IdMappingMode::EXACT)
-                                       .getDisjointSetOf(concrete_id)
-                                       .vector();
-    for (auto other_id : exact_mapped_ids) {
-      if (other_id->definition() == nullptr) {
-        continue;
-      }
-
-      if (!visited.emplace(other_id->definition()).second) {
-        // Already visited
-        continue;
-      }
-
-      if (ca_map->idGraph().exprsMap(
-              original_view_split,
-              other_id->definition(),
-              false,
-              IdMappingMode::EXACT)) {
-        all_divisible_splits.emplace(other_id->definition()->as<Split>());
-      }
+  for (auto set : all_mapped_disjoint_expr_sets) {
+    auto split_exprs = ir_utils::filterByType<Split>(set->vector());
+    for (auto split_expr : split_exprs) {
+      all_divisible_splits.emplace(split_expr);
     }
   }
 

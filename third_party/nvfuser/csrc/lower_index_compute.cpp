@@ -280,13 +280,17 @@ bool predicateAtEnd(kir::ForLoop* loop) {
 
   // If the other output is mapped with a vectorized IterDomain,
   // this IterDomain needs to be predicated at each iteration point.
-  const auto& other_id_exact_set = GpuLower::current()
-                                       ->caMap()
-                                       ->getIdSets(IdMappingMode::EXACT)
-                                       .getDisjointSetOf(other_out_id);
+  auto other_id_exact_set =
+      GpuLower::current()
+          ->caMap()
+          ->idGraph()
+          .getDisjointIdSet(other_out_id, IdMappingMode::EXACT)
+          .first;
 
   if (std::any_of(
-          other_id_exact_set.begin(), other_id_exact_set.end(), [](auto id) {
+          other_id_exact_set->vector().begin(),
+          other_id_exact_set->vector().end(),
+          [](auto id) {
             return id->getParallelType() == ParallelType::Vectorize;
           })) {
     return false;

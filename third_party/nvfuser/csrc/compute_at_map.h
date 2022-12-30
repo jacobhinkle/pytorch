@@ -61,6 +61,13 @@ namespace cuda {
 //
 class TORCH_CUDA_CU_API IterDomainGraph {
  public:
+  IterDomainGraph(
+      const std::vector<Expr*>& exprs,
+      bool allow_self_mapping = false);
+
+  // Same as the above constructor with fusion->exprs() excpet fusion may have
+  // some dangling inputs/outputs that are expected to have IterDomain entries
+  // even though there's no possible connections from them.
   IterDomainGraph(Fusion* fusion, bool allow_self_mapping = false);
 
   // Returns the disjoint set according to one of the mapping mode types.
@@ -84,17 +91,16 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   std::pair<std::shared_ptr<VectorOfUniqueEntries<Expr*>>, bool>
   getDisjointExprSet(Expr* expr, IdMappingMode mode) const;
 
+  // IterDomains are only allowed to be used once in the IterDomain graph,
+  // id->uses() are not directly used as there's no bounds check that would
+  // prevent a use from being defined that's not part of the actual fusion
+  // definition.
+  Expr* idUse(IterDomain* id) const;
+
   // TODO: Seems a bit unfortunate that this isn't IterDomain local information.
   const std::unordered_set<IterDomain*>& viewRfactorIds() const {
     return view_rfactor_ids_;
   }
-
-  // Returns if first and second are expressions through which the provided
-  // id_map have matching inputs (if forward), or outputs (if not forward).
-  // Returning true means the expressions are "the same", in terms they modify
-  // matching original extents, by the same amount.
-  bool exprsMap(Expr* first, Expr* second, bool forward, IdMappingMode mode)
-      const;
 
   // Returns if a self mapping was detected that would invalidate assumptions of
   // the overall lowering system.
@@ -114,9 +120,16 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // the map is preserved to be the order provided in to.
   std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
   buildMapBetween(
+      const std::vector<IterDomain*>& from,
+      const std::vector<IterDomain*>& to,
+      IdMappingMode mode) const;
+
+  // Alias of the above on unique vector entries
+  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
+  buildMapBetween(
       const VectorOfUniqueEntries<IterDomain*>& from,
       const VectorOfUniqueEntries<IterDomain*>& to,
-      IdMappingMode mode);
+      IdMappingMode mode) const;
 
   //! Returns
   //!   (1) The expressions associated with the definitions of the provided
@@ -144,7 +157,12 @@ class TORCH_CUDA_CU_API IterDomainGraph {
       IdMappingMode mode) const;
 
  private:
-  void build(Fusion* fusion);
+  // Sometimes fusion inputs or outputs are disconnected from expressions, in
+  // those cases we still may want to send in some additional tensor views from
+  // the Fusion that don't have expressions associated with them.
+  void build(
+      const std::vector<Expr*>& exprs,
+      const std::vector<TensorView*>& additional_tvs);
 
   // Copies all information computed for from into to. Useful for incremental
   // building of graph without having to rebuild entire graphs under a new mode.
@@ -153,7 +171,7 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // ======= START Iteration domain build process in order called =======
 
   // Fills id_uses_ for all IterDomains active in the fusion.
-  void buildIterDomainUses(Fusion* fusion);
+  void buildIterDomainUses(const std::vector<TensorView*>& all_tvs);
 
   // Initializes entries for the provided IterDomain in the overall
   // IterDomainGraph
@@ -161,7 +179,7 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   // Iterates over all Iter Domains in allTvs(fusion) computes
   // is_view_rfactor_id, is_leaf_id and calls initializeID.
-  void initialIdProcessing(Fusion* fusion);
+  void initialIdProcessing(const std::vector<TensorView*>& all_tvs);
 
   // Map through loop swizzles, as input/output IterDomains are exact, only the
   // order they're traversed differs.
@@ -192,6 +210,13 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Non-const internal only version of getDisjointExprsSet.
   DisjointSets<Expr*>& disjointExprsSet(IdMappingMode mode);
 
+  // Returns if first and second are expressions through which the provided
+  // id_map have matching inputs (if forward), or outputs (if not forward).
+  // Returning true means the expressions are "the same", in terms they modify
+  // matching original extents, by the same amount.
+  bool exprsMap(Expr* first, Expr* second, bool forward, IdMappingMode mode)
+      const;
+
   // Set id0 and id1 to mapped in disjointIdsSet[mode], update id0->definition()
   // and id1->definition() sets in disjointExprsSet.
   void mapIds(IterDomain* id0, IterDomain* id1, IdMappingMode mode);
@@ -210,6 +235,9 @@ class TORCH_CUDA_CU_API IterDomainGraph {
       Expr* second,
       bool forward,
       IdMappingMode mode);
+
+  // Errors if self mapping occurs
+  void assertNoSelfMapping();
 
   // Keeps a disjoint set entry for all IterDomain for all mapping mode types.
   //
@@ -317,13 +345,6 @@ class TORCH_CUDA_CU_API ComputeAtMap {
     return id_graph_;
   }
 
-  //! Get the ID sets for a provided IdMappingMode
-  const DisjointSets<IterDomain*>& getIdSets(IdMappingMode mode) const;
-
-  // Returns if the ID actually has a disjoint set meaning it has been processed
-  // in the creation of the compute at map.
-  bool idExistsInMap(IterDomain* id) const;
-
   //! Returns the pre-allocated index variable integer used in
   //!  the kir::ForLoop corresponding to the given IterDomain.
   //!  this interface is only valid if the ID has a loop mapping,
@@ -334,13 +355,8 @@ class TORCH_CUDA_CU_API ComputeAtMap {
       DoubleBufferLoopStage double_buffer_loop_stage =
           DoubleBufferLoopStage::NotApplicable) const;
 
-  // Returns if expr_1 and expr_2 have exact mapped IterDomains in
-  // inputs/outputs (order matters) and if the expressions have matching
-  // parameters.
-  bool areExactExprs(Expr* expr_1, Expr* expr_2);
-
-  // Produce the disjoint set containing provided id with mapping mode.
-  const std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>& disjointSetOf(
+  // Simple alias to IterDomainGraph::getDisjointIdSet
+  const std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> disjointSetOf(
       IterDomain* id,
       IdMappingMode mode) const;
 

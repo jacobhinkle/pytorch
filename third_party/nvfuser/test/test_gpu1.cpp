@@ -1521,7 +1521,7 @@ TEST_F(NVFuserTest, FusionExecKernel_CUDA) {
   auto outputs = fe.runFusion({input1, input2});
 
   at::Tensor check = at::full({1, 128}, 4, options);
-  ;
+
   TORCH_CHECK(outputs[0].equal(check));
 }
 
