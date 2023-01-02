@@ -306,11 +306,11 @@ class PredicateMagicZeroChecker : public kir::IrVisitor {
 };
 
 // Basically just TransformPropagator, except that it checks the consistency
-// replayPasC with getMatchedLeafPosWithoutReplayPasC, replayCasP with
-// getMatchedLeafPosWithoutReplayCasP, and fullSelfReplay with fullSelfMatching:
-// - After replayPasC, getMatchedLeafPosWithoutReplayPasC should return the same
+// replayPasC with getMatchedLeafPosWithoutReplayTasR, replayCasP with
+// getMatchedLeafPosWithoutReplayTasR, and fullSelfReplay with fullSelfMatching:
+// - After replayPasC, getMatchedLeafPosWithoutReplayTasR should return the same
 //   replayed position
-// - After replayCasP, getMatchedLeafPosWithoutReplayCasP should return the same
+// - After replayCasP, getMatchedLeafPosWithoutReplayTasR should return the same
 //   replayed position
 // - After fullSelfReplay, fullSelfMatching should return true
 struct TransformPropagatorWithCheck : public TransformPropagator {
@@ -320,22 +320,22 @@ struct TransformPropagatorWithCheck : public TransformPropagator {
     auto from_pos = replayed_pos_.at(from);
     auto to_pos = replayed_pos_.at(to);
     TORCH_CHECK(
-        TransformReplay::getMatchedLeafPosWithoutReplayPasC(
-            to, from, from_pos) == (int)to_pos);
+        TransformReplay::getMatchedLeafPosWithoutReplayTasR(
+            to, from, from_pos) == (int) to_pos);
   }
   virtual void propagateP2C(TensorView* from, TensorView* to) override {
     TransformPropagator::propagateP2C(from, to);
     auto from_pos = replayed_pos_.at(from);
     auto to_pos = replayed_pos_.at(to);
     TORCH_CHECK(
-        TransformReplay::getMatchedLeafPosWithoutReplayCasP(
-            to, from, from_pos) == (int)to_pos);
+        TransformReplay::getMatchedLeafPosWithoutReplayTasR(
+            to, from, from_pos) == (int) to_pos);
   }
   virtual void propagateSibling(TensorView* from, TensorView* to) override {
     TransformPropagator::propagateSibling(from, to);
     auto from_pos = replayed_pos_.at(from);
     auto to_pos = replayed_pos_.at(to);
-    TORCH_CHECK(from_pos == to_pos);
+    TORCH_CHECK(from_pos == (int) to_pos);
     TORCH_CHECK(TransformReplay::fullSelfMatching(from, to));
   }
   using TransformPropagator::TransformPropagator;

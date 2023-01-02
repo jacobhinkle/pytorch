@@ -125,7 +125,7 @@ size_t MaxPosCalculator::getMaxProducerPosFromConsumer(
     // If the producer position is mismatching with the consumer, then we can
     // not inline into this position, otherwise the max producer position of
     // the consumer will become invalid and expression sort will fail.
-    if (TransformReplay::getMatchedLeafPosWithoutReplayCasP(
+    if (TransformReplay::getMatchedLeafPosWithoutReplayTasR(
             consumer, producer, producer_pos + 1) < 0) {
       return producer_pos;
     }
@@ -229,13 +229,13 @@ FindMappedPositions::FindMappedPositions(
 void FindMappedPositions::propagateC2P(TensorView* from, TensorView* to) {
   int from_pos = output_.at(from);
   auto to_pos =
-      TransformReplay::getMatchedLeafPosWithoutReplayPasC(to, from, from_pos);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, from_pos);
   // If there is no matching position found, we compute the highest matched
   // position as the closest approximation
   while (to_pos < 0) {
     from_pos--;
     to_pos =
-        TransformReplay::getMatchedLeafPosWithoutReplayPasC(to, from, from_pos);
+        TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, from_pos);
   }
   output_[to] = to_pos;
 }
@@ -243,13 +243,13 @@ void FindMappedPositions::propagateC2P(TensorView* from, TensorView* to) {
 void FindMappedPositions::propagateP2C(TensorView* from, TensorView* to) {
   int from_pos = output_.at(from);
   auto to_pos =
-      TransformReplay::getMatchedLeafPosWithoutReplayCasP(to, from, from_pos);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, from_pos);
   // If there is no matching position found, we compute the highest matched
   // position as the closest approximation
   while (to_pos < 0) {
     from_pos--;
     to_pos =
-        TransformReplay::getMatchedLeafPosWithoutReplayCasP(to, from, from_pos);
+        TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, from_pos);
   }
   output_[to] = to_pos;
 }

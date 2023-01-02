@@ -5088,13 +5088,13 @@ TEST_F(NVFuserTest, FusionMatchedLeafPosWithoutReplayBroadcast_CUDA) {
   }
 
   TORCH_CHECK(
-      TransformReplay::getMatchedLeafPosWithoutReplayPasC(tv0, tv1, 3) == 3);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(tv0, tv1, 3) == 3);
   TORCH_CHECK(
-      TransformReplay::getMatchedLeafPosWithoutReplayCasP(tv1, tv0, 3) == 3);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(tv1, tv0, 3) == 3);
   TORCH_CHECK(
-      TransformReplay::getMatchedLeafPosWithoutReplayPasC(tv1, tv2, 3) == 3);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(tv1, tv2, 3) == 3);
   TORCH_CHECK(
-      TransformReplay::getMatchedLeafPosWithoutReplayCasP(tv2, tv1, 3) == 3);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(tv2, tv1, 3) == 3);
 }
 
 TEST_F(NVFuserTest, FusionPrint_CUDA) {

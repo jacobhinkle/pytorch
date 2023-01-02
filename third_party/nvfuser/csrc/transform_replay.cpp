@@ -1,6 +1,7 @@
 #include <transform_replay.h>
 
 #include <arith.h>
+#include <compute_at_map.h>
 #include <disjoint_set.h>
 #include <fusion.h>
 #include <instrumentation.h>
@@ -727,155 +728,232 @@ std::pair<TensorDomain*, unsigned int> TransformReplay::replayCasP(
       consumer, producer, compute_at_axis, root_map, replay_swizzle);
 }
 
-// In a PasC replay, we want the producer to exactly match the consumer:
-// all the beginning axes in the producer should be mapped to the consumer in
-// the same order. Reductions in the producer needs to be in the back of the
-// producer.
-int TransformReplay::getMatchedLeafPosWithoutReplayPasC(
-    const TensorView* producer,
-    const TensorView* consumer,
-    int consumer_pos) {
-  FUSER_PERF_SCOPE("transform_replay.cpp::getMatchedLeafPosWithoutReplayPasC");
-
-  const auto pairwise_map = PairwiseRootDomainMap(producer, consumer);
-  id_map c2p_root_map = pairwise_map.mapConsumerToProducer(
-      consumer->domain(), producer->domain());
-
-  // IterDomains in `consumer` root also in `producer` root
-  const auto consumer_domain = consumer->domain()->domain();
-
-  std::unordered_set<Val*> mapped_consumer_roots;
-  for (auto entry : c2p_root_map) {
-    mapped_consumer_roots.emplace(entry.first);
+namespace {
+bool isProducerOf(
+    const TensorView* maybe_producer,
+    const TensorView* maybe_consumer) {
+  if (maybe_consumer->definition() == nullptr) {
+    return false;
+  }
+  auto def = maybe_consumer->definition();
+  for (auto inp : ir_utils::filterByType<TensorView>(def->inputs())) {
+    if (maybe_producer == inp) {
+      return true;
+    }
   }
 
-  auto unskippable_consumer_ids_vec = DependencyCheck::getAllValsBetween(
-      mapped_consumer_roots, {consumer_domain.begin(), consumer_domain.end()});
-
-  std::unordered_set<Val*> unskippable_consumer_ids(
-      unskippable_consumer_ids_vec.begin(), unskippable_consumer_ids_vec.end());
-
-  // IterDomains in `producer` root also in `consumer` root
-  const auto producer_domain = producer->domain()->domain();
-
-  auto it_consumer = consumer_domain.begin();
-  auto it_producer = producer_domain.begin();
-
-  auto disjoint_sets =
-      BestEffortReplay::replayPasC(producer, consumer, -1, pairwise_map)
-          .getIterDomainEquivalence();
-
-  int mismatched_consumer_pos = 0;
-  int mismatched_producer_pos = 0;
-  while (it_consumer != consumer_domain.end()) {
-    if (consumer_pos == mismatched_consumer_pos) {
-      return mismatched_producer_pos;
-    }
-
-    auto consumer_id = *it_consumer;
-    if (unskippable_consumer_ids.count(consumer_id) == 0) {
-      ++it_consumer;
-      ++mismatched_consumer_pos;
-      continue;
-    }
-
-    if (it_producer == producer_domain.end()) {
-      return -1;
-    }
-
-    auto producer_id = *it_producer;
-    if (disjoint_sets.permissiveAreMapped(producer_id, consumer_id)) {
-      ++mismatched_consumer_pos;
-      ++mismatched_producer_pos;
-      ++it_consumer;
-      ++it_producer;
-    } else {
-      return -1;
-    }
-  }
-  if (consumer_pos == mismatched_consumer_pos) {
-    return mismatched_producer_pos;
-  }
-  return -1;
+  return false;
 }
 
-// We want to ignore reductions in the producer in a CasP replay.
-int TransformReplay::getMatchedLeafPosWithoutReplayCasP(
-    const TensorView* consumer,
-    const TensorView* producer,
-    int producer_pos) {
-  FUSER_PERF_SCOPE("transform_replay.cpp::getMatchedLeafPosWithoutReplayCasP");
-
-  const auto pairwise_map = PairwiseRootDomainMap(producer, consumer);
-  id_map p2c_root_map = pairwise_map.mapProducerToConsumer(
-      producer->domain(), consumer->domain());
-
-  // IterDomains in `producer` root that are not reduction
-  const auto producer_domain = producer->domain()->domain();
-  auto unskippable_producer_ids_vec =
-      TensorDomain::noReductions(producer_domain);
-  std::unordered_set<IterDomain*> unskippable_producer_ids(
-      unskippable_producer_ids_vec.begin(), unskippable_producer_ids_vec.end());
-
-  // IterDomains in `consumer` root also in `producer` root
-  const auto consumer_domain = consumer->domain()->domain();
-
-  std::unordered_set<Val*> mapped_consumer_roots;
-  for (auto entry : p2c_root_map) {
-    mapped_consumer_roots.emplace(entry.second);
+bool isSiblingOf(
+    const TensorView* maybe_sibling_0,
+    const TensorView* maybe_sibling_1) {
+  if (maybe_sibling_0->definition() == nullptr) {
+    return false;
+  }
+  auto def = maybe_sibling_0->definition();
+  for (auto other_output_tv :
+       ir_utils::filterByType<TensorView>(def->outputs())) {
+    if (other_output_tv == maybe_sibling_1) {
+      return true;
+    }
   }
 
-  auto unskippable_consumer_ids_vec = DependencyCheck::getAllValsBetween(
-      mapped_consumer_roots, {consumer_domain.begin(), consumer_domain.end()});
+  return false;
+}
+} // namespace
 
-  std::unordered_set<Val*> unskippable_consumer_ids(
-      unskippable_consumer_ids_vec.begin(), unskippable_consumer_ids_vec.end());
+// Return the position in target that matches with reference at maximum position
+// reference_pos
+int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
+    const TensorView* target,
+    const TensorView* reference,
+    int reference_pos) {
+  FUSER_PERF_SCOPE("transform_replay.cpp::getMatchedLeafPosWithoutReplayTasR");
 
-  auto it_producer = producer_domain.begin();
-  auto it_consumer = consumer_domain.begin();
+  if (reference_pos < 0) {
+    reference_pos += reference->nDims();
+  }
 
-  auto disjoint_sets =
-      BestEffortReplay::replayPasC(producer, consumer, -1, pairwise_map)
-          .getIterDomainEquivalence();
+  TORCH_INTERNAL_ASSERT(
+      reference_pos >= 0 && reference_pos <= reference->nDims(),
+      reference_pos,
+      " is an invalid posiotion for ",
+      reference->toString());
 
-  int mismatched_producer_pos = 0;
-  int mismatched_consumer_pos = 0;
-  while (it_producer != producer_domain.end()) {
-    if (producer_pos == mismatched_producer_pos) {
-      return mismatched_consumer_pos;
+  Expr* definition_to_map = nullptr;
+  bool debug = false;
+
+  std::vector<IterDomain*> target_root;
+  std::vector<IterDomain*> reference_root;
+
+  // Some logic still dependent on if producer or consumer (i.e. PasC vs CasP)
+  //
+  // Would be nice if this was concisely captured in the IterDomainGraph
+  const TensorView* producer = nullptr;
+  const TensorView* consumer = nullptr;
+
+  if (isProducerOf(reference, target)) {
+    // CasP
+    consumer = target;
+    producer = reference;
+
+    definition_to_map = target->definition();
+    reference_root = reference->getMaybeRFactorDomain();
+    target_root = target->getRootDomain();
+  } else if (isProducerOf(target, reference)) {
+    // PasC
+    producer = target;
+    consumer = reference;
+
+    definition_to_map = reference->definition();
+    reference_root = reference->getRootDomain();
+    target_root = target->getMaybeRFactorDomain();
+    debug = true;
+  } else if (target == reference) {
+    return (int)target->domain()->nDims() + 1;
+  } else if (isSiblingOf(target, reference)) {
+    reference_root = reference->getRootDomain();
+    target_root = target->getRootDomain();
+    definition_to_map = target->definition();
+  } else {
+    TORCH_INTERNAL_ASSERT(
+        false,
+        "Unsupported relationship for",
+        " getMatchedLeafPosWithoutReplayTasR with reference: ",
+        reference->toString(),
+        ", and ",
+        target->toString());
+  }
+
+  IterDomainGraph id_graph({definition_to_map});
+
+  auto r2t_permissive_map = id_graph.buildMapBetween(
+      ir_utils::allIDsOf(reference),
+      ir_utils::allIDsOf(target),
+      IdMappingMode::PERMISSIVE);
+
+  // Dimensions in consumer or producer that map across their common expression.
+  VectorOfUniqueEntries<IterDomain*> unskippable_root_dims;
+  for (auto r_root_id : reference_root) {
+    auto r_root_id_it = r2t_permissive_map.find(r_root_id);
+    TORCH_INTERNAL_ASSERT(
+        r_root_id_it != r2t_permissive_map.end(),
+        "Error building map from IterDomain graph.");
+    if (r_root_id_it->second.empty()) {
+      continue;
+    }
+    unskippable_root_dims.pushBack(r_root_id);
+    for (auto t_id : r_root_id_it->second) {
+      if (std::find(target_root.begin(), target_root.end(), t_id) !=
+          target_root.end()) {
+        unskippable_root_dims.pushBack(t_id);
+      }
+    }
+  }
+
+  if (target == producer) {
+    // TODO: Revisit. I dislike the special handling here for unskippable dims
+    // as it seems like it should be collected in the IterDomainGraph.
+    //
+    // PasC hass some extra rules for skippable dims. This isn't symmetric with
+    // the other way around because of how we use this function for inlining.
+    bool gather_scatter_op = std::any_of(
+        reference_root.begin(),
+        reference_root.end(),
+        [](IterDomain* c_root_id) { return c_root_id->isGatherScatter(); });
+
+    for (auto p_id : target_root) {
+      // Data movement based primitives cannot be inlined into references
+      if (p_id->isReduction() || p_id->isGather() || p_id->isStride() ||
+          gather_scatter_op) {
+        unskippable_root_dims.pushBack(p_id);
+      }
+    }
+  }
+
+  VectorOfUniqueEntries<IterDomain*> unskippable_domain_ids;
+
+  const auto target_domain = target->domain()->domain();
+  const auto reference_domain = reference->domain()->domain();
+
+  {
+    std::vector<IterDomain*> target_reference_domains = target_domain;
+    target_reference_domains.insert(
+        target_reference_domains.begin(),
+        reference_domain.begin(),
+        reference_domain.end());
+
+    auto unskippable_ids_vec = DependencyCheck::getAllValsBetween(
+        {unskippable_root_dims.vector().begin(),
+         unskippable_root_dims.vector().end()},
+        {target_reference_domains.begin(), target_reference_domains.end()});
+
+    std::unordered_set<Val*> unskippable_ids_set(
+        {unskippable_ids_vec.begin(), unskippable_ids_vec.end()});
+
+    for (auto id : target_reference_domains) {
+      if (unskippable_ids_set.find(id) != unskippable_ids_set.end()) {
+        unskippable_domain_ids.pushBack(id);
+      }
+    }
+  }
+
+  if (producer == target) {
+    for (auto producer_id : producer->domain()->domain()) {
+      if (producer_id->isReduction()) {
+        unskippable_domain_ids.pushBack(producer_id);
+      }
+    }
+  }
+
+  auto it_reference = reference_domain.begin();
+  auto it_target = target_domain.begin();
+
+  while ((it_reference != reference_domain.end() ||
+          it_target != target_domain.end()) &&
+         (int)std::distance(reference_domain.begin(), it_reference) !=
+             reference_pos) {
+    if (it_target != target_domain.end()) {
+      auto target_id = *it_target;
+      if (!unskippable_domain_ids.has(target_id)) {
+        ++it_target;
+        continue;
+      }
     }
 
-    auto producer_id = *it_producer;
-    if (unskippable_producer_ids.count(producer_id) == 0) {
-      ++it_producer;
-      ++mismatched_producer_pos;
+    if (it_reference != reference_domain.end()) {
+      auto reference_id = *it_reference;
+      if (!unskippable_domain_ids.has(reference_id)) {
+        ++it_reference;
+        continue;
+      }
+    }
+
+    if (it_reference == reference_domain.end() ||
+        it_target == target_domain.end()) {
+      break;
+    }
+
+    auto reference_id = *it_reference;
+    auto target_id = *it_target;
+
+    if (id_graph.getDisjointIdSets(IdMappingMode::PERMISSIVE)
+            .permissiveAreMapped(reference_id, target_id)) {
+      ++it_reference;
+      ++it_target;
       continue;
     }
 
-    if (it_consumer == consumer_domain.end()) {
-      return -1;
-    }
-
-    auto consumer_id = *it_consumer;
-    if (unskippable_consumer_ids.count(consumer_id) == 0) {
-      ++it_consumer;
-      ++mismatched_consumer_pos;
-      continue;
-    }
-
-    if (disjoint_sets.permissiveAreMapped(producer_id, consumer_id)) {
-      ++mismatched_producer_pos;
-      ++mismatched_consumer_pos;
-      ++it_producer;
-      ++it_consumer;
-    } else {
-      return -1;
-    }
+    break;
   }
-  if (producer_pos == mismatched_producer_pos) {
-    return mismatched_consumer_pos;
+
+  if ((int)std::distance(reference_domain.begin(), it_reference) ==
+      reference_pos) {
+    return (int)std::distance(target_domain.begin(), it_target);
+  } else {
+    return -1;
   }
-  return -1;
 }
 
 bool TransformReplay::fullSelfMatching(
@@ -932,7 +1010,7 @@ void TransformPropagator::propagateC2P(TensorView* from, TensorView* to) {
   // information on how to do the correct transformation. The logic below tells
   // TransformPropagator to skip the replay when not necessary.
   int new_pos =
-      TransformReplay::getMatchedLeafPosWithoutReplayPasC(to, from, pos);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, pos);
   bool debug = isDebugDumpEnabled(DebugDumpOption::TransformPropagator);
   if (debug) {
     std::cout << "TransformPropagator::propagateC2P" << std::endl;
@@ -963,7 +1041,7 @@ void TransformPropagator::propagateP2C(TensorView* from, TensorView* to) {
   int pos = replayed_pos_.at(from);
   // See note [Using multiple TransformPropagators]
   int new_pos =
-      TransformReplay::getMatchedLeafPosWithoutReplayCasP(to, from, pos);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, pos);
   bool debug = isDebugDumpEnabled(DebugDumpOption::TransformPropagator);
   if (debug) {
     std::cout << "TransformPropagator::propagateP2C" << std::endl;
@@ -1034,7 +1112,7 @@ void MostInlinedTransformPropagator::propagateC2P(
   int pos = from->nDims();
   // See note [Using multiple TransformPropagators]
   int new_pos =
-      TransformReplay::getMatchedLeafPosWithoutReplayPasC(to, from, pos);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, pos);
   bool debug = isDebugDumpEnabled(DebugDumpOption::TransformPropagator);
   if (debug) {
     std::cout << "MostInlinedTransformPropagator::propagateC2P" << std::endl;
@@ -1065,7 +1143,7 @@ void MostInlinedTransformPropagator::propagateP2C(
   int pos = from->nDims();
   // See note [Using multiple TransformPropagators]
   int new_pos =
-      TransformReplay::getMatchedLeafPosWithoutReplayCasP(to, from, pos);
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, pos);
   bool debug = isDebugDumpEnabled(DebugDumpOption::TransformPropagator);
   if (debug) {
     std::cout << "MostInlinedTransformPropagator::propagateP2C" << std::endl;

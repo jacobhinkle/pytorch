@@ -159,26 +159,19 @@ class TORCH_CUDA_CU_API TransformReplay {
       const TensorDomain* new_self_root,
       const TensorDomain* self);
 
-  // Returns the leaf position in producer that matches with `consumer_pos` in
-  // consumer. Returns -1 if matching is impossible. This function can be used
-  // to test if replay is needed for getting matching outer dims. This function
-  // should be consistent with `replayPasC`: if you pass the tensors just
-  // replayed by replayPasC as inputs, you should return exactly the same
-  // position as `replayPasC`. However, this function is more tolerant than
-  // fully matching `replayPasC`: if in the consumer, there are unmappable
-  // dimensions, these dimensions are just ignored.
-  static int getMatchedLeafPosWithoutReplayPasC(
-      const TensorView* producer,
-      const TensorView* consumer,
-      int consumer_pos);
-
-  // Returns the leaf position in consumer that matches with `producer_pos` in
-  // producer. Behavior similar to getMatchedLeafPosWithoutReplayPasC, except
-  // that we are also ignoring reductions in the producer.
-  static int getMatchedLeafPosWithoutReplayCasP(
-      const TensorView* consumer,
-      const TensorView* producer,
-      int producer_pos);
+  // Returns the leaf position in reference that matches with `target_pos` in
+  // target. Returns -1 if matching is impossible. This function can be used
+  // to test if replay is needed to have matching outer dims across target and
+  // reference. This function is consistent with PasC and CasP, however it
+  // requires a direct producer-consumer relationship. If tensors just replayed
+  // with replayPasC or replayCasP as inputs, the same position as replayPasC or
+  // replayCasP will be returned. This function, however, is more tolerant than
+  // fully matching `replayPasC`: if there are unmappable dimensions in the
+  // target, these dimensions are simply ignored.
+  static int getMatchedLeafPosWithoutReplayTasR(
+      const TensorView* target,
+      const TensorView* reference,
+      int reference_pos);
 
   // tests if two tensors has fully matching transformations
   static bool fullSelfMatching(
