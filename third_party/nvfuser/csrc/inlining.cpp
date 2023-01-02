@@ -257,7 +257,7 @@ void FindMappedPositions::propagateP2C(TensorView* from, TensorView* to) {
 void FindMappedPositions::propagateSibling(TensorView* from, TensorView* to) {
   auto from_pos = output_.at(from);
   TORCH_CHECK(
-      TransformReplay::fullSelfMatching(to, from),
+      TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, -1) != -1,
       "Transformations in siblings ",
       from,
       " and ",

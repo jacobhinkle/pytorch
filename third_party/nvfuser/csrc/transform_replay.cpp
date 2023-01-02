@@ -782,7 +782,6 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
       reference->toString());
 
   Expr* definition_to_map = nullptr;
-  bool debug = false;
 
   std::vector<IterDomain*> target_root;
   std::vector<IterDomain*> reference_root;
@@ -809,9 +808,8 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
     definition_to_map = reference->definition();
     reference_root = reference->getRootDomain();
     target_root = target->getMaybeRFactorDomain();
-    debug = true;
   } else if (target == reference) {
-    return (int)target->domain()->nDims() + 1;
+    return (int)target->domain()->nDims();
   } else if (isSiblingOf(target, reference)) {
     reference_root = reference->getRootDomain();
     target_root = target->getRootDomain();
@@ -956,36 +954,6 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
   }
 }
 
-bool TransformReplay::fullSelfMatching(
-    const TensorView* replay,
-    const TensorView* target) {
-  auto replay_root = replay->getRootDomain();
-  auto replay_dom = replay->domain()->domain();
-  auto target_root = target->getRootDomain();
-  auto target_dom = target->domain()->domain();
-  std::unordered_map<IterDomain*, IterDomain*> target2replay_map;
-  if (replay_root.size() != target_root.size()) {
-    return false;
-  }
-  target2replay_map.reserve(replay_root.size());
-  std::transform(
-      target_root.begin(),
-      target_root.end(),
-      replay_root.begin(),
-      std::inserter(target2replay_map, target2replay_map.begin()),
-      [](auto a, auto b) { return std::make_pair(a, b); });
-  BestEffortReplay replay_(replay_dom, target_dom, target2replay_map);
-  auto r = replay_.getReplay();
-  for (int64_t i = 0; i < (int64_t)replay_dom.size(); i++) {
-    auto target_id = target_dom[i];
-    auto replay_it = r.find(target_id);
-    if (replay_it == r.end() || replay_it->second != replay_dom[i]) {
-      return false;
-    }
-  }
-  return true;
-}
-
 namespace {
 
 // Make sure if tv is set to new_td it doesn't violate set compute at and max
@@ -1077,7 +1045,7 @@ void TransformPropagator::propagateSibling(TensorView* from, TensorView* to) {
     std::cout << "  from: " << from << " @ " << pos << std::endl;
     std::cout << "  to: " << to << std::endl;
   }
-  if (!TransformReplay::fullSelfMatching(to, from)) {
+  if (TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, -1) == -1) {
     auto replay = TransformReplay::fullSelfReplay(to->domain(), from->domain());
     TORCH_INTERNAL_ASSERT(
         validateDomain(to, replay),
@@ -1179,7 +1147,7 @@ void MostInlinedTransformPropagator::propagateSibling(
     std::cout << "  from: " << from << std::endl;
     std::cout << "  to: " << to << std::endl;
   }
-  if (!TransformReplay::fullSelfMatching(to, from)) {
+  if (TransformReplay::getMatchedLeafPosWithoutReplayTasR(to, from, -1) == -1) {
     auto replay = TransformReplay::fullSelfReplay(to->domain(), from->domain());
     TORCH_INTERNAL_ASSERT(
         validateDomain(to, replay),

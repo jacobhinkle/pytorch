@@ -162,21 +162,17 @@ class TORCH_CUDA_CU_API TransformReplay {
   // Returns the leaf position in reference that matches with `target_pos` in
   // target. Returns -1 if matching is impossible. This function can be used
   // to test if replay is needed to have matching outer dims across target and
-  // reference. This function is consistent with PasC and CasP, however it
-  // requires a direct producer-consumer relationship. If tensors just replayed
-  // with replayPasC or replayCasP as inputs, the same position as replayPasC or
-  // replayCasP will be returned. This function, however, is more tolerant than
-  // fully matching `replayPasC`: if there are unmappable dimensions in the
-  // target, these dimensions are simply ignored.
+  // reference. This function is consistent with PasC and CasP, only works for
+  // direct producer-consumer relationships, sibling relationships, or passing
+  // in target==reference. If tensors just replayed with replayPasC or
+  // replayCasP as inputs, the same position as replayPasC or replayCasP will be
+  // returned. This function, however, is more tolerant than fully matching
+  // `replayPasC`: if there are unmappable dimensions in the target, these
+  // dimensions are simply ignored.
   static int getMatchedLeafPosWithoutReplayTasR(
       const TensorView* target,
       const TensorView* reference,
       int reference_pos);
-
-  // tests if two tensors has fully matching transformations
-  static bool fullSelfMatching(
-      const TensorView* replay,
-      const TensorView* target);
 };
 
 class TORCH_CUDA_CU_API TransformPropagator

@@ -306,13 +306,11 @@ class PredicateMagicZeroChecker : public kir::IrVisitor {
 };
 
 // Basically just TransformPropagator, except that it checks the consistency
-// replayPasC with getMatchedLeafPosWithoutReplayTasR, replayCasP with
-// getMatchedLeafPosWithoutReplayTasR, and fullSelfReplay with fullSelfMatching:
-// - After replayPasC, getMatchedLeafPosWithoutReplayTasR should return the same
-//   replayed position
-// - After replayCasP, getMatchedLeafPosWithoutReplayTasR should return the same
-//   replayed position
-// - After fullSelfReplay, fullSelfMatching should return true
+// with getMatchedLeafPosWithoutReplayTasR which should return the same replayed
+// position after
+// - replayPasC
+// - replayCasP
+// - fullSelfReplay
 struct TransformPropagatorWithCheck : public TransformPropagator {
  public:
   virtual void propagateC2P(TensorView* from, TensorView* to) override {
@@ -336,7 +334,9 @@ struct TransformPropagatorWithCheck : public TransformPropagator {
     auto from_pos = replayed_pos_.at(from);
     auto to_pos = replayed_pos_.at(to);
     TORCH_CHECK(from_pos == (int) to_pos);
-    TORCH_CHECK(TransformReplay::fullSelfMatching(from, to));
+    TORCH_CHECK(
+        TransformReplay::getMatchedLeafPosWithoutReplayTasR(from, to, -1) !=
+        -1);
   }
   using TransformPropagator::TransformPropagator;
 };
