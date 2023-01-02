@@ -63,6 +63,11 @@ class TORCH_CUDA_CU_API IterDomainGraph {
  public:
   IterDomainGraph(
       const std::vector<Expr*>& exprs,
+      const std::vector<TensorView*>& additional_tvs,
+      bool allow_self_mapping = false);
+
+  IterDomainGraph(
+      const std::vector<Expr*>& exprs,
       bool allow_self_mapping = false);
 
   // Same as the above constructor with fusion->exprs() excpet fusion may have

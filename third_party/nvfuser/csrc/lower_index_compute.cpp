@@ -32,30 +32,21 @@ namespace {
 std::unordered_map<IterDomain*, IterDomain*> mapAllProducerDomainsToConsumer(
     const TensorView* producer_tv,
     const TensorView* consumer_tv) {
-  // This map has forwarded broadcast axes, it should only be used to compute
-  // the allocation position of the producer
+  auto full_p2c_map = GpuLower::current()->caMap()->idGraph().buildMapBetween(
+      ir_utils::allIDsOf(producer_tv),
+      ir_utils::allIDsOf(consumer_tv),
+      IdMappingMode::PERMISSIVE);
+
+  // Doesn't matter which consumer id we map to, just need to specify one if
+  // multiple exist. This map is only checked based on permissive mapping.
   std::unordered_map<IterDomain*, IterDomain*> p2c_alloc_map;
-
-  //  We want to replay producer as consumer instead of the other way around
-  //  since consumer may have some broadcasted axes producer doesn't have
-  //  merged into loops producer may use. If we did consumer as producer we
-  //  wouldn't have this information in the mapping.
-  auto replay_PasC = BestEffortReplay::replayPasC(
-      producer_tv,
-      consumer_tv,
-      -1,
-      PairwiseRootDomainMap(producer_tv, consumer_tv));
-
-  // Grab consumer domain entries and reverse replay map. TODO: Maybe
-  // TransformReplay::replayPasC could return this map
-  for (auto id : consumer_tv->domain()->domain()) {
-    const auto& c2p_map = replay_PasC.getReplay();
-    auto c2p_it = c2p_map.find(id);
-    if (c2p_it != c2p_map.end()) {
-      auto c_id = c2p_it->first;
-      auto p_id = c2p_it->second;
-      p2c_alloc_map[p_id] = c_id;
+  for (auto entry : full_p2c_map) {
+    auto p_id = entry.first;
+    auto c_ids = entry.second;
+    if (c_ids.empty()) {
+      continue;
     }
+    p2c_alloc_map[p_id] = c_ids.front();
   }
 
   return p2c_alloc_map;

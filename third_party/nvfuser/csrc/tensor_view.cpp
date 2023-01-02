@@ -425,10 +425,8 @@ unsigned int getConsumerPosAlignedToProducerCA(
   // have the mapping iS22{( 3 * 1 )} <- iS1{3} We need the latter. Refer to
   // NVFuserTest.FusionComplexBCast1_CUDA
 
-  auto disjoint_sets =
-      BestEffortReplay::replayPasC(
-          producer, consumer, -1, PairwiseRootDomainMap(producer, consumer))
-          .getIterDomainEquivalence();
+  TORCH_INTERNAL_ASSERT(consumer->definition() != nullptr);
+  IterDomainGraph id_graph({consumer->definition()});
 
   // Find the innermost position of consumer that has
   //  been mapped within the producer ca axis.
@@ -439,8 +437,9 @@ unsigned int getConsumerPosAlignedToProducerCA(
     if (std::any_of(
             p_dom.begin(),
             p_dom.begin() + producer_pos,
-            [&consumer_id, &disjoint_sets](IterDomain* p_id) {
-              return disjoint_sets.permissiveAreMapped(consumer_id, p_id);
+            [&consumer_id, &id_graph](IterDomain* p_id) {
+              return id_graph.getDisjointIdSets(IdMappingMode::PERMISSIVE)
+                  .permissiveAreMapped(consumer_id, p_id);
             })) {
       break;
     }

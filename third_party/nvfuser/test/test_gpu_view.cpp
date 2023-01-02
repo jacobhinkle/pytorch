@@ -831,16 +831,24 @@ TEST_F(NVFuserTest, FusionViewConcreteDomain5_CUDA) {
     TORCH_CHECK(path1_out->nDims() == 1);
     TORCH_CHECK(path2_out->nDims() == 1);
 
-    ComputeAtMap map(&fusion);
+    kir::Kernel kernel(&fusion);
+    ComputeAtMap map(&kernel);
+
+    auto path1_out_kernel = order ? kernel.outputs()[1]->as<TensorView>()
+                                  : kernel.outputs()[0]->as<TensorView>();
+    auto path2_out_kernel = order ? kernel.outputs()[0]->as<TensorView>()
+                                  : kernel.outputs()[1]->as<TensorView>();
 
     // Make sure the two output tensors are mapped. Note both are 1D.
     TORCH_CHECK(map.areMapped(
-        path1_out->axis(0), path2_out->axis(0), IdMappingMode::LOOP));
+        path1_out_kernel->axis(0),
+        path2_out_kernel->axis(0),
+        IdMappingMode::LOOP));
 
     auto concrete_id =
-        map.getConcreteMappedID(path2_out->axis(0), IdMappingMode::LOOP);
+        map.getConcreteMappedID(path2_out_kernel->axis(0), IdMappingMode::LOOP);
     TORCH_CHECK(
-        path2_out->axis(0) == concrete_id,
+        path2_out_kernel->axis(0) == concrete_id,
         "Incorrect concrete ID: ",
         concrete_id->toString());
   }

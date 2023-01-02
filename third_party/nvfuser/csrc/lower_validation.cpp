@@ -46,11 +46,16 @@ class ValidateSiblings : public IterVisitor {
 
     auto ref_output = expr->outputs().at(0)->as<TensorView>();
     auto ref_ndims = ref_output->nDims();
-    const auto& ref_root = ref_output->getRootDomain();
     std::unordered_map<IterDomain*, IterDomain*> id_map;
 
-    for (const auto sibling :
-         ir_utils::filterByType<TensorView>(expr->outputs())) {
+    auto output_tvs = ir_utils::filterByType<TensorView>(expr->outputs());
+    if (std::distance(output_tvs.begin(), output_tvs.end()) <= 1) {
+      return;
+    }
+
+    IterDomainGraph id_graph({expr});
+
+    for (const auto sibling : output_tvs) {
       if (ref_output == sibling) {
         continue;
       }
@@ -68,19 +73,14 @@ class ValidateSiblings : public IterVisitor {
         validateParallelTypes(ref_output->axis(i), sibling->axis(i));
       }
 
-      for (const auto i : c10::irange(ref_root.size())) {
-        id_map[ref_root[i]] = sibling->getRootDomain().at(i);
-      }
-
-      auto replay = BestEffortReplay(
-                        sibling->domain()->domain(),
-                        ref_output->domain()->domain(),
-                        id_map)
-                        .getIterDomainEquivalence();
-
       for (const auto i : c10::irange(ref_ndims)) {
+        auto set_0_pair = id_graph.getDisjointIdSet(
+            ref_output->axis(i), IdMappingMode::EXACT);
+        auto set_1_pair =
+            id_graph.getDisjointIdSet(sibling->axis(i), IdMappingMode::EXACT);
         TORCH_INTERNAL_ASSERT(
-            replay.strictAreMapped(ref_output->axis(i), sibling->axis(i)),
+            set_0_pair.second && set_1_pair.second &&
+                set_0_pair.first == set_1_pair.first,
             "Matching sibling ID not found. Expr: ",
             expr->toString(),
             "Ref ID: ",

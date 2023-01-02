@@ -16,13 +16,19 @@ namespace cuda {
 
 IterDomainGraph::IterDomainGraph(
     const std::vector<Expr*>& exprs,
+    const std::vector<TensorView*>& additional_tvs,
     bool allow_self_mapping) {
-  build(exprs, {});
+  build(exprs, additional_tvs);
 
   if (!allow_self_mapping) {
     assertNoSelfMapping();
   }
 }
+
+IterDomainGraph::IterDomainGraph(
+    const std::vector<Expr*>& exprs,
+    bool allow_self_mapping)
+    : IterDomainGraph(exprs, {}, allow_self_mapping) {}
 
 IterDomainGraph::IterDomainGraph(Fusion* fusion, bool allow_self_mapping) {
   std::vector<TensorView*> inputs_and_outputs;
@@ -585,7 +591,8 @@ IterDomainGraph::buildMapBetween(
     from_ids2set[from_id] = from_disjoint_set_pair.first;
   }
 
-  // Map from the sets associated with the IterDomains in to, to the
+  // Map from the sets associated with the IterDomains in to, to those iter
+  // domains
   std::unordered_map<
       std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>,
       VectorOfUniqueEntries<IterDomain*>>
@@ -907,7 +914,6 @@ void IterDomainGraph::buildLoopMap(const std::vector<Expr*>& exprs) {
     for (auto other_tv_output : other_tv_outputs) {
       // Sibling tv's must be exactly mapped with eachother so simply zip their
       // leaf iter domains.
-
       TORCH_INTERNAL_ASSERT(
           other_tv_output->domain()->domain().size() ==
               c_tv->domain()->domain().size(),
@@ -1040,7 +1046,11 @@ void IterDomainGraph::build(
   buildExactMap(tv_exprs);
   buildAlmostExactMap();
   buildPermissiveMap(tv_exprs);
-  buildLoopMap(tv_exprs);
+
+  // Only build loop map during lowering
+  if (FusionGuard::getCurFusion()->isA<kir::Kernel>()) {
+    buildLoopMap(tv_exprs);
+  }
 
   // Debug, make sure there's no self mapping in TensorView's during lowering
   // that would invalidate lowering assumptions.

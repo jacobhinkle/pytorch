@@ -1,3 +1,4 @@
+#include <compute_at_map.h>
 #include <ir_builder.h>
 #include <ir_utils.h>
 #include <root_domain_map.h>
@@ -13,24 +14,16 @@ namespace cuda {
 namespace {
 
 // Return if ref and other are transformed in the same way.
-bool hasMatchingTransformations(TensorView* ref, TensorView* other) {
-  std::unordered_map<IterDomain*, IterDomain*> ref_2_other;
-  for (const auto i : c10::irange(ref->getRootDomain().size())) {
-    ref_2_other.emplace(
-        ref->getRootDomain().at(i), other->getRootDomain().at(i));
-  }
-
-  auto replay =
-      BestEffortReplay(
-          other->domain()->domain(), ref->domain()->domain(), ref_2_other)
-          .getIterDomainEquivalence();
-
+bool hasMatchingTransformations(
+    TensorView* ref,
+    TensorView* other,
+    const IterDomainGraph& id_graph) {
   for (const auto i : c10::irange(ref->nDims())) {
-    if (!replay.permissiveAreMapped(ref->axis(i), other->axis(i))) {
+    if (!id_graph.getDisjointIdSets(IdMappingMode::EXACT)
+             .permissiveAreMapped(ref->axis(i), other->axis(i))) {
       return false;
     }
   }
-
   return true;
 }
 
@@ -45,7 +38,7 @@ void validateReductionGrouping(
   TORCH_INTERNAL_ASSERT(
       fusion != nullptr, "Grouping of reductions must be done within a Fusion");
 
-  ExactRootDomainMap exact_map(fusion);
+  IterDomainGraph id_graph(fusion);
 
   // Pick the first output TV as a reference and compare it with the
   // rest. Do not allow grouping if any mismatch is detected.
@@ -112,19 +105,10 @@ void validateReductionGrouping(
           output_id->toString(),
           ". Invalid tensor: ",
           output_tv->toString());
-      TORCH_INTERNAL_ASSERT(
-          exact_map.areMapped(ref_id, output_id) || ref_id->sameAs(output_id),
-          "Invalid grouped reduction due to mismatched root domains. ",
-          "Reference domain: ",
-          ref_id->toString(),
-          ". Mismatched domain: ",
-          output_id->toString(),
-          ". Invalid tensor: ",
-          output_tv->toString());
     }
 
     TORCH_INTERNAL_ASSERT(
-        hasMatchingTransformations(ref_tv, output_tv),
+        hasMatchingTransformations(ref_tv, output_tv, id_graph),
         "Invalid grouped reduction due to mismatched transformations. ",
         "Reference tensor: ",
         ref_tv->toString(),
