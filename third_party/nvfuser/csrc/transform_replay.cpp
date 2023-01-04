@@ -434,6 +434,7 @@ std::pair<TensorDomain*, unsigned int> TransformReplay::replayPasC(
   }
 
   unsigned int producer_pos = new_IDs.size();
+  bool mismatch_found = false;
 
   // Add axes in (2)
   for (auto c_id : consumer->domain()->domain()) {
@@ -444,11 +445,15 @@ std::pair<TensorDomain*, unsigned int> TransformReplay::replayPasC(
       // forward in BestEffortReplay, it is not a final ID.
       if (producer_replayed_leaves.getUnorderedLeafIDs().find(id) ==
           producer_replayed_leaves.getUnorderedLeafIDs().end()) {
+        mismatch_found = true;
         continue;
       }
       if (used_IDs.find(id) == used_IDs.end()) {
         new_IDs.push_back(id);
         used_IDs.emplace(id);
+        if(!mismatch_found){
+          producer_pos = new_IDs.size();
+        }
       }
     }
   }
@@ -675,6 +680,9 @@ std::pair<TensorDomain*, unsigned int> TransformReplay::replayCasP(
     }
   }
 
+  // This position doesn't quite match the position inliner would considered
+  // "replayed at". Both (1) and (2) aren't quite right as a reduction dim in
+  // producer would be "maybe unampped" however we can't inline relative to it.
   unsigned int consumer_pos = new_IDs.size();
 
   // Add axes in (3)
@@ -831,42 +839,55 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
       ir_utils::allIDsOf(target),
       IdMappingMode::PERMISSIVE);
 
-  // Dimensions in consumer or producer that map across their common expression.
-  VectorOfUniqueEntries<IterDomain*> unskippable_root_dims;
-  for (auto r_root_id : reference_root) {
-    auto r_root_id_it = r2t_permissive_map.find(r_root_id);
-    TORCH_INTERNAL_ASSERT(
-        r_root_id_it != r2t_permissive_map.end(),
-        "Error building map from IterDomain graph.");
-    if (r_root_id_it->second.empty()) {
-      continue;
+  // The only dimensions we can actually skip in the replay is consumer
+  // broadcast dimensions that don't map to any dimensions in producer.
+  VectorOfUniqueEntries<IterDomain*> skippable_root_dims;
+  if (consumer != nullptr) {
+    for (auto c_root_id : consumer->getRootDomain()) {
+      if (c_root_id->isBroadcast()) {
+        skippable_root_dims.pushBack(c_root_id);
+      }
     }
-    unskippable_root_dims.pushBack(r_root_id);
-    for (auto t_id : r_root_id_it->second) {
-      if (std::find(target_root.begin(), target_root.end(), t_id) !=
-          target_root.end()) {
-        unskippable_root_dims.pushBack(t_id);
+    for(auto r2t_entry : r2t_permissive_map){
+      auto r_id = r2t_entry.first;
+      if(r2t_entry.second.empty()){
+        continue;
+      }
+      skippable_root_dims.erase(r_id);
+      for(auto t_id : r2t_entry.second){
+        skippable_root_dims.erase(t_id);
       }
     }
   }
 
-  if (target == producer) {
-    // TODO: Revisit. I dislike the special handling here for unskippable dims
-    // as it seems like it should be collected in the IterDomainGraph.
-    //
-    // PasC hass some extra rules for skippable dims. This isn't symmetric with
-    // the other way around because of how we use this function for inlining.
-    bool gather_scatter_op = std::any_of(
-        reference_root.begin(),
-        reference_root.end(),
-        [](IterDomain* c_root_id) { return c_root_id->isGatherScatter(); });
-
-    for (auto p_id : target_root) {
-      // Data movement based primitives cannot be inlined into references
-      if (p_id->isReduction() || p_id->isGather() || p_id->isStride() ||
-          gather_scatter_op) {
-        unskippable_root_dims.pushBack(p_id);
+  if (producer != nullptr) {
+    for (auto p_root_id : producer->getMaybeRFactorDomain()) {
+      if (p_root_id->isBroadcast()) {
+        skippable_root_dims.pushBack(p_root_id);
       }
+    }
+    for(auto r2t_entry : r2t_permissive_map){
+      auto r_id = r2t_entry.first;
+      if(r2t_entry.second.empty()){
+        continue;
+      }
+      skippable_root_dims.erase(r_id);
+      for(auto t_id : r2t_entry.second){
+        skippable_root_dims.erase(t_id);
+      }
+    }
+  }
+  
+  VectorOfUniqueEntries<IterDomain*> unskippable_root_dims;
+  for(auto r_root_id : reference_root){
+    if(!skippable_root_dims.has(r_root_id)){
+      unskippable_root_dims.pushBack(r_root_id);
+    }
+  }
+
+  for(auto t_root_id : target_root){
+    if(!skippable_root_dims.has(t_root_id)){
+      unskippable_root_dims.pushBack(t_root_id);
     }
   }
 
@@ -893,14 +914,6 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
     for (auto id : target_reference_domains) {
       if (unskippable_ids_set.find(id) != unskippable_ids_set.end()) {
         unskippable_domain_ids.pushBack(id);
-      }
-    }
-  }
-
-  if (producer == target) {
-    for (auto producer_id : producer->domain()->domain()) {
-      if (producer_id->isReduction()) {
-        unskippable_domain_ids.pushBack(producer_id);
       }
     }
   }

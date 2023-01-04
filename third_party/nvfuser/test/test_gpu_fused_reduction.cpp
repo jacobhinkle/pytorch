@@ -1740,10 +1740,8 @@ TEST_F(
   auto tv5_rf = rf_tvs.at(0);
   auto tv9_rf = rf_tvs.at(1);
 
-  tv0->computeAt(tv5_rf, -2, ComputeAtMode::BestEffort);
-  tv1->computeAt(tv9_rf, -2, ComputeAtMode::BestEffort);
-  tv3->computeAt(tv5_rf, -1, ComputeAtMode::BestEffort);
-  tv4->computeAt(tv9_rf, -1, ComputeAtMode::BestEffort);
+  inlineMost(std::unordered_set<IterDomain*>{
+      tv0_cache->axis(-1), tv1_cache->axis(-1)});
 
   ref = tv5_rf;
 
