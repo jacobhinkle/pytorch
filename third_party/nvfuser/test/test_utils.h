@@ -345,7 +345,7 @@ struct TransformPropagatorWithCheck : public TransformPropagator {
     TransformPropagator::propagateSibling(from, to);
     auto from_pos = replayed_pos_.at(from);
     auto to_pos = replayed_pos_.at(to);
-    TORCH_CHECK(from_pos == (int) to_pos);
+    TORCH_CHECK(from_pos == to_pos);
     TORCH_CHECK(
         TransformReplay::getMatchedLeafPosWithoutReplayTasR(from, to, -1) !=
         -1);

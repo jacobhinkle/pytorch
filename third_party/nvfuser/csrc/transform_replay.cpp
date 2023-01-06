@@ -784,7 +784,7 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
   }
 
   TORCH_INTERNAL_ASSERT(
-      reference_pos >= 0 && reference_pos <= reference->nDims(),
+      reference_pos >= 0 && reference_pos <= (int) reference->nDims(),
       reference_pos,
       " is an invalid posiotion for ",
       reference->toString());
