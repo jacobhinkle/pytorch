@@ -1317,6 +1317,27 @@ void ensureStaticIndexing(
 
 namespace {
 
+// Makes sure the map provided is actually one to one, and changes the second
+// type in map from VectorOfUniqueEntries<IterDomain*> to IterDomain*
+std::unordered_map<IterDomain*, IterDomain*> makeOneToOne(
+    const std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>&
+        map) {
+  std::unordered_map<IterDomain*, IterDomain*> one_to_one;
+  for (const auto& kv : map) {
+    if (kv.second.empty()) {
+      continue;
+    }
+    TORCH_INTERNAL_ASSERT(
+        kv.second.size() == 1,
+        "Invalid map to invert because: ",
+        kv.first->toString(),
+        " maps to more than one entry: ",
+        kv.second.toString());
+    one_to_one.emplace(kv.first, kv.second.front());
+  }
+  return one_to_one;
+}
+
 std::unordered_map<IterDomain*, IterDomain*> invertOneToOneMap(
     const std::unordered_map<IterDomain*, IterDomain*>& map) {
   std::unordered_map<IterDomain*, IterDomain*> inverted;
@@ -1350,19 +1371,13 @@ std::vector<Val*> Index::getGlobalProducerStridedIndices(
   // Make the producer_tv look like consumer while performing indexing math
   ir_utils::TVDomainGuard domain_guard(producer_tv, producerAsC);
 
-  // Map sent to best effort replay needs to match the exact incantation for
-  // compute_at_mode.cpp with MappingMode::Index
-  auto c2p_root_map =
-      PairwiseRootDomainMap(producer_tv, consumer_tv, true)
-          .mapConsumerToProducer(consumer_tv->domain(), producer_tv->domain());
+  TORCH_INTERNAL_ASSERT(consumer_tv->definition() != nullptr);
+  IterDomainGraph id_graph({consumer_tv->definition()});
 
-  // This replay has to be consistent with compute at index map.
-  BestEffortReplay replay_producer_as_consumer(
-      producer_tv->domain()->domain(),
-      consumer_tv->domain()->domain(),
-      c2p_root_map);
-
-  auto c2p_map = replay_producer_as_consumer.getReplay();
+  auto c2p_map = makeOneToOne(id_graph.buildMapBetween(
+      ir_utils::allIDsOf(consumer_tv),
+      ir_utils::allIDsOf(producer_tv),
+      IdMappingMode::EXACT));
 
   // Make sure at least root domains are mapped even when extents may
   // be different. This mapping is important for the indexing lookup
@@ -1603,19 +1618,14 @@ std::vector<Val*> Index::getNonGlobalProducerStridedIndices(
   std::unordered_map<IterDomain*, IterDomain*> c2p_index_map;
   std::unordered_map<IterDomain*, IterDomain*> p2c_index_map;
 
-  // Map sent to best effort replay needs to match the exact incantation for
-  // compute_at_mode.cpp with MappingMode::Index
-  auto c2p_root_map =
-      PairwiseRootDomainMap(producer_tv, consumer_tv, true)
-          .mapConsumerToProducer(consumer_tv->domain(), producer_tv->domain());
+  TORCH_INTERNAL_ASSERT(consumer_tv->definition() != nullptr);
+  IterDomainGraph id_graph({consumer_tv->definition()});
 
-  // This replay has to be consistent with compute at index map.
-  BestEffortReplay replay_producer_as_consumer(
-      producer_tv->domain()->domain(),
-      consumer_tv->domain()->domain(),
-      c2p_root_map);
+  c2p_index_map = makeOneToOne(id_graph.buildMapBetween(
+      ir_utils::allIDsOf(consumer_tv),
+      ir_utils::allIDsOf(producer_tv),
+      IdMappingMode::EXACT));
 
-  c2p_index_map = replay_producer_as_consumer.getReplay();
   p2c_index_map = invertOneToOneMap(c2p_index_map);
 
   // Forward vectorized IDs to index into producer correctly

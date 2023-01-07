@@ -161,6 +161,8 @@ class TORCH_CUDA_CU_API IterDomainGraph {
       std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> id_group,
       IdMappingMode mode) const;
 
+  std::string toString() const;
+
  private:
   // Sometimes fusion inputs or outputs are disconnected from expressions, in
   // those cases we still may want to send in some additional tensor views from

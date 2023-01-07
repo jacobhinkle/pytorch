@@ -727,6 +727,18 @@ void IterDomainGraph::buildIterDomainUses(
   }
 }
 
+// TODO: Extend to include other information.
+std::string IterDomainGraph::toString() const {
+  std::stringstream ss;
+  ss << "IterDomainGraph { \n";
+  for (auto set : disjoint_ids_) {
+    ss << "Set " << set.first << ": " << std::endl;
+    ss << set.second.toString() << std::endl;
+  }
+  ss << " } IterDomainGraph\n" << std::endl;
+  return ss.str();
+}
+
 void IterDomainGraph::initialIdProcessing(
     const std::vector<TensorView*>& all_tvs) {
   // Initialize entries for every iteration domain and mark view like
@@ -1016,6 +1028,7 @@ void IterDomainGraph::build(
 
   std::copy_if(
       exprs.begin(), exprs.end(), std::back_inserter(tv_exprs), [](Expr* expr) {
+        TORCH_INTERNAL_ASSERT(expr != nullptr);
         return ir_utils::isTvOp(expr);
       });
 
@@ -1642,7 +1655,7 @@ std::string idGraphDisjointIdSetToString(
 
 } // namespace
 
-// TODO: This should be on IterDomainGraph
+// TODO: Deduplicate with IterDomainGraph::toString()
 std::string ComputeAtMap::toString() const {
   std::stringstream ss;
   ss << "Compute at map { \n";

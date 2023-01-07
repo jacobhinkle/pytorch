@@ -144,7 +144,7 @@ class VectorOfUniqueEntries {
     return vector_.end();
   }
 
-  std::string toString() {
+  std::string toString() const {
     std::stringstream ss;
     ss << "{ ";
     for (auto entry : vector()) {

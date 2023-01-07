@@ -1330,8 +1330,8 @@ MmaOp::MmaOp(
 
 std::string MmaOp::toString(int indent_size) const {
   std::stringstream ss;
-  indent(ss, indent_size) << out()->toString() << " = mma(" << inA()->toString()
-                          << "," << inB()->toString();
+  indent(ss, indent_size) << out()->toString() << "\n  = mma("
+                          << inA()->toString() << "\n  ," << inB()->toString();
   ss << ")\n";
   return ss.str();
 }
