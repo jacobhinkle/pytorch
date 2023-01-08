@@ -37,8 +37,13 @@ class VectorOfUniqueEntries {
  public:
   VectorOfUniqueEntries() = default;
 
-  VectorOfUniqueEntries(const std::initializer_list<T>& x)
-      : vector_(x), set_(x) {}
+  VectorOfUniqueEntries(const std::initializer_list<T>& initializer) {
+    for (auto entry : initializer) {
+      pushBack(entry);
+    }
+  }
+
+  // TODO: Add copy constructor
 
   template <class InputIt>
   VectorOfUniqueEntries(InputIt first, InputIt last) {
@@ -63,6 +68,32 @@ class VectorOfUniqueEntries {
       any_added = any_added | pushBack(entry);
     }
     return any_added;
+  }
+
+  // Returns a new VectorOfUniqueEntries with entries that are in both this and
+  // other, order is preserved as this.
+  VectorOfUniqueEntries<T, Hash> intersect(
+      const VectorOfUniqueEntries<T, Hash>& other) {
+    VectorOfUniqueEntries<T, Hash> intersection;
+    for (auto entry : vector()) {
+      if (other.has(entry)) {
+        intersection.pushBack(entry);
+      }
+    }
+    return intersection;
+  }
+
+  // Returns a new VectorOfUniqueEntries with entries that are in this but not
+  // in other.
+  VectorOfUniqueEntries<T, Hash> subtract(
+      const VectorOfUniqueEntries<T, Hash>& other) {
+    VectorOfUniqueEntries<T, Hash> subtraction;
+    for (auto entry : vector()) {
+      if (!other.has(entry)) {
+        subtraction.pushBack(entry);
+      }
+    }
+    return subtraction;
   }
 
   // Returns a const vector useful for iterating on
@@ -332,11 +363,7 @@ class DisjointSets {
     const std::string sep("  ");
     for (auto s_ptr : disjoint_sets_) {
       auto& set = *s_ptr;
-      ss << sep << "{\n";
-      for (auto entry : set.vector()) {
-        ss << sep << sep << abstractToString(entry) << "\n";
-      }
-      ss << sep << "}\n";
+      ss << sep << abstractToString(set) << "\n";
     }
     ss << "}";
     return ss.str();

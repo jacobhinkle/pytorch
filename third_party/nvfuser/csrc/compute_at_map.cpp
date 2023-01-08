@@ -3,6 +3,8 @@
 #include <disjoint_set.h>
 #include <ir_utils.h>
 #include <lower2device.h>
+#include <lower_trivial_broadcast.h>
+#include <lower_utils.h>
 #include <root_domain_map.h>
 #include <transform_iter.h>
 
@@ -1063,6 +1065,10 @@ void IterDomainGraph::build(
   // Only build loop map during lowering
   if (FusionGuard::getCurFusion()->isA<kir::Kernel>()) {
     buildLoopMap(tv_exprs);
+
+    // Find loops that need to be promoted to their consumers because of
+    // broadcast resolution
+    buildLoopPromotionMap();
   }
 
   // Debug, make sure there's no self mapping in TensorView's during lowering
@@ -1123,6 +1129,202 @@ void IterDomainGraph::copyGraph(
   }
 }
 
+namespace {
+
+// Returns the producer iteration domains that are resolved by provided consumer
+VectorOfUniqueEntries<IterDomain*> producerResolvedBroadcasts(
+    TensorView* producer,
+    TensorView* consumer) {
+  auto p2c_map =
+      PairwiseRootDomainMap(producer, consumer)
+          .mapProducerToConsumer(producer->domain(), consumer->domain());
+
+  VectorOfUniqueEntries<IterDomain*> producer_resolved_bcasts;
+  for (const auto& kv : p2c_map) {
+    auto p_id = kv.first;
+    // Ignore non-broadcast dims
+    if (!p_id->isBroadcast()) {
+      continue;
+    }
+    auto c_id = kv.second;
+    // If the consumer ID is a reduction (i.e., a trivial
+    // reduction), do not consider it's concretized.
+    if (c_id->isBroadcast() || c_id->isReduction()) {
+      continue;
+    }
+    producer_resolved_bcasts.pushBack(p_id);
+  }
+  return producer_resolved_bcasts;
+}
+} // namespace
+
+void IterDomainGraph::buildLoopPromotionMap() {
+  auto all_tvs = ir_utils::allTvs(FusionGuard::getCurFusion());
+  // Need to process from consumers to producers as a domain that has a resolved
+  // broadcast merged in a consumer can result in a merged resolved broadcast in
+  // a producer.
+  std::reverse(all_tvs.begin(), all_tvs.end());
+
+  // Only loops that have a resolved broadcast merged into a non-broadcast
+  // need to be promoted. "Merged" does not necessarily mean undergone a
+  // "merge" operation. A swizzle operation with an iteration domain that has
+  // a resolved broadcast operating with a dimension that's not broadcast also
+  // requires loop promotion.
+  VectorOfUniqueEntries<IterDomain*> resolved_bcast_merged_in;
+
+  for (auto producer : all_tvs) {
+    auto producer_root = producer->getMaybeRFactorDomain();
+    auto producer_domain = producer->domain()->domain();
+
+    // Grab all iteration domains in producer that its compute at iter domains
+    // depend on.
+    VectorOfUniqueEntries<IterDomain*> all_producer_ca_deps;
+    {
+      auto ca_dep_vals = DependencyCheck::getAllValsBetween(
+          {producer_root.begin(), producer_root.end()},
+          {producer_domain.begin(),
+           producer_domain.begin() + producer->getComputeAtPosition()});
+
+      auto ca_deps_filter = ir_utils::filterByType<IterDomain>(ca_dep_vals);
+
+      all_producer_ca_deps.insert(ca_deps_filter.begin(), ca_deps_filter.end());
+    }
+
+    // Grab the domains in producer's rfactor domain are used to construct
+    // producer compute at iter domains.
+    VectorOfUniqueEntries<IterDomain*> all_producer_ca_roots;
+
+    for (auto producer_id : producer_root) {
+      if (all_producer_ca_deps.has(producer_id)) {
+        all_producer_ca_roots.pushBack(producer_id);
+      }
+    }
+
+    // Find all the broadcast domains in producer that are resolved in its
+    // consumers
+    VectorOfUniqueEntries<IterDomain*> producer_resolved_bcasts;
+    auto consumers = ir_utils::consumerTvsOf(producer);
+    for (auto consumer : consumers) {
+      auto resolutions = producerResolvedBroadcasts(producer, consumer);
+      producer_resolved_bcasts.pushBack(resolutions);
+    }
+
+    // At this point
+    // all_producer_ca_deps: All the IterDomains between the
+    //      compute at position of the producer domain and the producer roots.
+    // all_producer_ca_roots: Intersection of all_producer_ca_deps and
+    //      producer's root
+    // producer_resolved_bcasts: IterDomains in producer root being resolved
+    //      with consumer.
+
+    // Find all broadcasts in producer that are both resolved by a consumer and
+    // are within the inlined dimensions (within compute at position)
+    auto producer_ca_resolved_bcasts =
+        producer_resolved_bcasts.intersect(all_producer_ca_roots);
+
+    bool merged_in_bcast_found = !producer_ca_resolved_bcasts.empty();
+
+    // Propagate any resolved bcast merged in from consumer to producer within
+    // producer CA deps
+    for (auto consumer : consumers) {
+      auto c2p_permissive_map = buildMapBetween(
+          ir_utils::allIDsOf(consumer),
+          all_producer_ca_deps.vector(),
+          IdMappingMode::PERMISSIVE);
+      for (auto entry : c2p_permissive_map) {
+        auto c_id = entry.first;
+        auto p_ids = entry.second;
+        if (p_ids.empty()) {
+          continue;
+        }
+        if (resolved_bcast_merged_in.has(c_id) &&
+            all_producer_ca_deps.has(p_ids.back())) {
+          resolved_bcast_merged_in.pushBack(p_ids.back());
+          merged_in_bcast_found = true;
+        }
+      }
+    }
+
+    if (!merged_in_bcast_found) {
+      // There are no loops to resolve on this producer, can simply continue.
+      // continue;
+      continue;
+    }
+
+    // Grab expr history of iter domains in target_domain
+    std::vector<Expr*> producer_domain_exprs = StmtSort::getExprs(
+        FusionGuard::getCurFusion(),
+        std::vector<Val*>(producer_domain.begin(), producer_domain.end()));
+
+    for (auto expr : producer_domain_exprs) {
+      auto inp_ids = ir_utils::filterByType<IterDomain>(expr->inputs());
+      auto out_ids = ir_utils::filterByType<IterDomain>(expr->outputs());
+
+      // Input to expression has a broadcast that's resolved by producer's
+      // consumer
+      auto inp_has_resolved_bcast = std::any_of(
+          inp_ids.begin(),
+          inp_ids.end(),
+          [&producer_ca_resolved_bcasts](IterDomain* id) {
+            return producer_ca_resolved_bcasts.has(id);
+          });
+
+      // Input to expression has a broadcast that's resolved by producer's
+      // consumer merged into it somewhere in its history, so this domain must
+      // be resolved based on the consumers domain. It's for loop should be
+      // based on the consumer's IterDomain not the producer's.
+      auto inp_has_merged_resolved_bcast = std::any_of(
+          inp_ids.begin(),
+          inp_ids.end(),
+          [resolved_bcast_merged_in](IterDomain* id) {
+            return resolved_bcast_merged_in.has(id);
+          });
+
+      // One of the output iteration domains is not a broadcast. Helps prevent
+      // us from resolving expressions that are only comprised of broadcast iter
+      // domains.
+      auto out_is_not_bcast =
+          std::any_of(out_ids.begin(), out_ids.end(), [](IterDomain* id) {
+            return !id->isBroadcast();
+          });
+
+      if (inp_has_resolved_bcast) {
+        // If the input is a resolved broadcast, so are all the outputs
+        producer_ca_resolved_bcasts.insert(out_ids.begin(), out_ids.end());
+      }
+
+      // If the input has a resolved broadcast but one of the output domains is
+      // not a broadcast, then we just merged a broadcast in the producer
+      // resolved by consumer into another iteration domain. If the input
+      // already has a merged resolved broadcast then all of the outputs do as
+      // well.
+      if ((inp_has_resolved_bcast && out_is_not_bcast) ||
+          inp_has_merged_resolved_bcast) {
+        resolved_bcast_merged_in.insert(out_ids.begin(), out_ids.end());
+      }
+    }
+
+    // Promote all iteration domains with a resolved broadcast merged in
+    for (auto consumer : consumers) {
+      auto p2c_permissive_map = buildMapBetween(
+          ir_utils::allIDsOf(producer),
+          ir_utils::allIDsOf(consumer),
+          IdMappingMode::PERMISSIVE);
+
+      for (auto entry : p2c_permissive_map) {
+        auto p_id = entry.first;
+        auto c_ids = entry.second;
+        if (c_ids.empty()) {
+          continue;
+        }
+        if (resolved_bcast_merged_in.has(p_id)) {
+          loop_promotion_map_[p_id] = c_ids.back();
+        }
+      }
+    }
+  }
+}
+
 ComputeAtMap::ComputeAtMap(Fusion* fusion)
     : id_graph_(fusion), concretized_bcasts_(fusion), fusion_(fusion) {
   build(fusion);
@@ -1131,6 +1333,204 @@ ComputeAtMap::ComputeAtMap(Fusion* fusion)
 void ComputeAtMap::build(Fusion* fusion) {
   buildConsumersMap();
   buildConcreteIds();
+  testValidate();
+}
+
+// TODO: Cleanup, edges are unique expr's and nodes are disjoint sets
+bool ComputeAtMap::indexingReachableFrom(
+    const VectorOfUniqueEntries<IterDomain*>& from,
+    const VectorOfUniqueEntries<IterDomain*>& to) {
+  // Convert inputs to exact disjoint sets
+  std::deque<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>> to_visit;
+  for (auto from_id : from) {
+    to_visit.push_back(disjointSetOf(from_id, IdMappingMode::ALMOSTEXACT));
+  }
+
+  // Convert outputs to exact disjoint sets
+  std::unordered_set<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
+      to_resolve;
+  for (auto to_id : to) {
+    to_resolve.emplace(disjointSetOf(to_id, IdMappingMode::ALMOSTEXACT));
+  }
+
+  // Any output that's also an input is automatically resolved remove them
+  for (auto entry : to_visit) {
+    to_resolve.erase(entry);
+  }
+
+  std::unordered_set<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
+      visited;
+  visited.insert(to_visit.begin(), to_visit.end());
+
+  // Collect nodes if we can't process them in not_visited, if we end up
+  // visiting any node then add all not_visited to visited.
+  //
+  // That way if we have a case where we can't get from outputs to inputs,
+  // not_visited will fill up as to_visit is being drained, signally we can't
+  // make forward progress.
+  //
+  // Traversal is "backwards" so in_id's is actually expr->output
+  // and out_id is actually expr->input
+  std::deque<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>> not_visited;
+  while (!to_visit.empty() && !to_resolve.empty()) {
+    auto currently_visiting = to_visit.front();
+    to_visit.pop_front();
+
+    auto defs_it = id_graph_.iterDomainGroupDefinitions(
+        currently_visiting, IdMappingMode::ALMOSTEXACT);
+    if (!defs_it.second) {
+      TORCH_INTERNAL_ASSERT(
+          currently_visiting->front()->definition() == nullptr,
+          "unique_definitions_.at(IdMappingMode::ALMOSTEXACT) wasn't correctly generated, missing the disjoint set:\n",
+          currently_visiting->toString());
+    }
+
+    // does not return one def, but multiple unique groups of exact defs.
+    std::vector<Expr*> def_exprs;
+    for (auto group : defs_it.first) {
+      if (group->size() > 0) {
+        def_exprs.push_back(group->front());
+      }
+    }
+
+    {
+      // Clear out any expression that's already been resolved
+      decltype(def_exprs) unresolved_exprs;
+      std::copy_if(
+          def_exprs.begin(),
+          def_exprs.end(),
+          std::back_inserter(unresolved_exprs),
+          [&](Expr* def_expr) {
+            auto out_ids =
+                ir_utils::filterByType<IterDomain>(def_expr->inputs());
+            return std::any_of(
+                out_ids.begin(), out_ids.end(), [&](IterDomain* out_id) {
+                  return visited.find(disjointSetOf(
+                             out_id, IdMappingMode::ALMOSTEXACT)) ==
+                      visited.end();
+                  // If any expression input has not been traversed we still
+                  // can traverse def_expr
+                });
+          });
+
+      std::swap(def_exprs, unresolved_exprs);
+    }
+
+    if (def_exprs.empty()) {
+      // Nothing to resolve based on this set, just continue.
+      continue;
+    }
+
+    // check if all def expressions have been resolved
+    for (auto def_expr : def_exprs) {
+      auto in_ids = ir_utils::filterByType<IterDomain>(def_expr->outputs());
+      if (std::any_of(in_ids.begin(), in_ids.end(), [&](IterDomain* in_id) {
+            return visited.find(disjointSetOf(
+                       in_id, IdMappingMode::ALMOSTEXACT)) == visited.end();
+          })) {
+        // Cannot process this def_expr, continue all of the expr output ids
+        // haven't been visited
+        continue;
+      }
+
+      // All expr outputs were already visited, can mark this set as visited
+      // and add expr inputs to to_visit
+      // Visit nodes
+      visited.emplace(currently_visiting);
+      to_resolve.erase(currently_visiting);
+      auto out_ids = ir_utils::filterByType<IterDomain>(def_expr->inputs());
+      for (auto out_id : out_ids) {
+        visited.emplace(disjointSetOf(out_id, IdMappingMode::ALMOSTEXACT));
+        to_resolve.erase(disjointSetOf(out_id, IdMappingMode::ALMOSTEXACT));
+      }
+
+      // Move not_visited to back of to_visit as it may now be visitable
+      to_visit.insert(to_visit.end(), not_visited.begin(), not_visited.end());
+      not_visited.clear();
+
+      // Add inputs to to_visit
+      auto inp_ids = ir_utils::filterByType<IterDomain>(def_expr->inputs());
+      for (auto inp_id : inp_ids) {
+        to_visit.push_back(disjointSetOf(inp_id, IdMappingMode::ALMOSTEXACT));
+      }
+    }
+  }
+
+  if (!to_resolve.empty()) {
+    std::cerr
+        << "New indexing approach does not work here yet, did not resolve:"
+        << std::endl;
+    for (auto entry : to_resolve) {
+      std::cerr << "  " << entry->toString() << std::endl;
+    }
+  }
+
+  return to_resolve.empty();
+}
+
+void ComputeAtMap::testValidate() {
+  // Scheduling can use compute at map, and may be in a bad state, only check
+  // during lowering
+  if (!FusionGuard::getCurFusion()->isA<kir::Kernel>()) {
+    return;
+  }
+
+  auto all_tvs = ir_utils::allTvs(FusionGuard::getCurFusion());
+  for (auto tv : all_tvs) {
+    // Fusion inputs don't result in control flow, ignore.
+    if (tv->isFusionInput()) {
+      continue;
+    }
+
+    for (auto tv : all_tvs) {
+      VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
+          tv_loop_domains;
+
+      // Grab the iter domains that should be used for the for loops.
+      VectorOfUniqueEntries<IterDomain*> loop_ids;
+      for (auto id : tv->domain()->domain()) {
+        // Traverse the promotion map until a leaf is found
+        IterDomain* promoted_id = id_graph_.getMaybePromoted(id);
+
+        while (promoted_id != id_graph_.getMaybePromoted(promoted_id)) {
+          promoted_id = id_graph_.getMaybePromoted(promoted_id);
+        }
+
+        TORCH_INTERNAL_ASSERT(
+            id_graph_.getDisjointIdSets(IdMappingMode::LOOP)
+                .mappingExists(promoted_id),
+            "Loop id's aren't inclusive, as a producer could look to promote to an IterDomain that's not a consumer's leaf domain.",
+            " Error from trying to promote ",
+            id,
+            " to ",
+            promoted_id);
+        auto promoted_loop_concrete_id =
+            getConcreteMappedID(promoted_id, IdMappingMode::LOOP);
+
+        loop_ids.pushBack(promoted_loop_concrete_id);
+      }
+
+      // Grab the iter domains we need to index into
+      VectorOfUniqueEntries<IterDomain*> root_ids;
+      for (auto id : tv->getMaybeRFactorDomain()) {
+        if (id->isBroadcast()) {
+          // Broadcast IDs don't need to be indexable
+          continue;
+        }
+        root_ids.pushBack(id);
+      }
+
+      // // TODO: Add assert once full loop promotion is implemented.
+      // // Check if root is indexable based on loops
+      // TORCH_INTERNAL_ASSERT(
+      //     indexingReachableFrom(loop_ids, root_ids),
+      //     "Could not detect how to resolve the indexing from loop
+      //     IterDomains: ", loop_ids.toString(), " to root iter domains: ",
+      //     root_ids.toString(),
+      //     "\n When checking the indexing of ",
+      //     tv->toString());
+    }
+  }
 }
 
 void ComputeAtMap::validateAndPropagatePType() {
@@ -1540,7 +1940,7 @@ void ComputeAtMap::buildConsumersMap() {
 
 void ComputeAtMap::buildConcreteIds() {
   // For the exact map just select the first ID since they're all exactly the
-  // same size, it doesn't matter which is selected. This should be run-to-run
+  // same size, it does not matter which is selected. This should be run-to-run
   // deterministic but which ID gets selected her depends on the traversal
   // order generating the set (compute at map build).
   for (const auto& disjoint_set_shared_ptr :

@@ -537,6 +537,7 @@ void LoopIndexingAnalysis::run() {
 
   // Resolve definition of each exact concrete id's involved in the whole loop
   // nest transform history
+  // Fill replayed_concrete_ids_ and concrete_to_original_id_
   traverseFromDomainVals();
 
   // Construct concrete to consumer map. The replayed exprs are guaranteed to

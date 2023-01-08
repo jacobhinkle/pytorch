@@ -163,6 +163,14 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   std::string toString() const;
 
+  auto getMaybePromoted(IterDomain* id) {
+    auto loop_entry_it = loop_promotion_map_.find(id);
+    if (loop_entry_it != loop_promotion_map_.end()) {
+      return loop_entry_it->second;
+    }
+    return id;
+  }
+
  private:
   // Sometimes fusion inputs or outputs are disconnected from expressions, in
   // those cases we still may want to send in some additional tensor views from
@@ -208,6 +216,8 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Fills disjoint_ids_[IdMappingMode::LOOP] for relationships between inputs
   // and first output of expr
   void buildLoopMap(const std::vector<Expr*>& exprs);
+
+  void buildLoopPromotionMap();
 
   // ======= END Iteration domain build process in order called =======
 
@@ -283,6 +293,8 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Debug information to hold if a self mapping in a TensorView is found.
   c10::optional<std::tuple<TensorView*, IterDomain*, IterDomain*, std::string>>
       self_mapping_info_ = c10::nullopt;
+
+  std::unordered_map<IterDomain*, IterDomain*> loop_promotion_map_;
 };
 
 using DoubleBufferIndices = std::unordered_map<DoubleBufferLoopStage, Int*>;
@@ -406,6 +418,19 @@ class TORCH_CUDA_CU_API ComputeAtMap {
   void buildConsumersMap();
 
   void buildConcreteIds();
+
+  // Temporary pass to make sure loop promotion is working as anticipated. May
+  // want to keep this as validation, but also may want to remove it.
+  void testValidate();
+
+  // Considering the DAG:
+  //   Inputs defined as the Almost Exact sets for IterDomains in from
+  //   Outputs defined as the Almost Exact sets for IterDomains in to
+  //   Directed edges as unique_exact_definitions_
+  // Return if the DAG has all inputs to reach all outputs
+  bool indexingReachableFrom(
+      const VectorOfUniqueEntries<IterDomain*>& from,
+      const VectorOfUniqueEntries<IterDomain*>& to);
 
   // Should be built once and never modified again.
   IterDomainGraph id_graph_;

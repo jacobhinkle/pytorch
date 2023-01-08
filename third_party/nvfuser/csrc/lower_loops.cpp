@@ -166,6 +166,9 @@ void LoopNestGenerator::generate(const std::vector<Expr*>& exprs) {
     std::unordered_set<IterDomain*> dependencies;
 
     for (auto tv_id : tv->domain()->domain()) {
+      // This assumes that disjoint sets in the compute at domain are perfectly
+      // 1:1 with the loops. If we have loop promotion which breaks this
+      // assumption this will not work.
       auto concrete_id =
           ca_map->getConcreteMappedID(tv_id, IdMappingMode::LOOP);
 

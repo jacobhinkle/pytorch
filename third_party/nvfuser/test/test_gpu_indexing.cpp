@@ -3,7 +3,9 @@
 #include <gtest/gtest.h>
 
 #include <arith.h>
+#include <compute_at_map.h>
 #include <executor.h>
+#include <inlining.h>
 #include <ir_all_nodes.h>
 #include <ir_builder.h>
 #include <scheduler/all_schedulers.h>
@@ -74,6 +76,7 @@ TEST_F(NVFuserTest, FusionIndexing1_CUDA) {
       &fusion, cg_outputs, aten_inputs, {aten_output}, __LINE__, __FILE__);
 }
 
+// Same as 1 but merge starting from inner most dimension
 TEST_F(NVFuserTest, FusionIndexing2_CUDA) {
   Fusion fusion;
   FusionGuard fg(&fusion);
@@ -128,6 +131,7 @@ TEST_F(NVFuserTest, FusionIndexing2_CUDA) {
       &fusion, cg_outputs, aten_inputs, {aten_output}, __LINE__, __FILE__);
 }
 
+// Same compute as 1 and 2 but use a scheduler.
 TEST_F(NVFuserTest, FusionIndexing3_CUDA) {
   Fusion fusion;
   FusionGuard fg(&fusion);
@@ -162,6 +166,7 @@ TEST_F(NVFuserTest, FusionIndexing3_CUDA) {
       &fusion, cg_outputs, aten_inputs, {aten_output}, __LINE__, __FILE__);
 }
 
+// Same as 3 but use 3 dimensions and concrete sizes
 TEST_F(NVFuserTest, FusionIndexing4_CUDA) {
   Fusion fusion;
   FusionGuard fg(&fusion);
@@ -369,8 +374,8 @@ TEST_F(NVFuserTest, FusionIndexing8_CUDA) {
       &fusion, cg_outputs, {at_t0, at_t1}, {aten_output}, __LINE__, __FILE__);
 }
 
+// Same as 5 but using implicit broadcast
 TEST_F(NVFuserTest, FusionIndexing9_CUDA) {
-  // Same as 7 but with outer splits instead of inner
   Fusion fusion;
   FusionGuard fg(&fusion);
 
@@ -786,6 +791,77 @@ TEST_F(NVFuserTest, FusionIndexing17_CUDA) {
 
   testValidate(
       &fusion, cg_outputs, aten_inputs, aten_outputs, __LINE__, __FILE__);
+}
+
+// TODO: Finish and enable test
+TEST_F(NVFuserTest, FusionIndexing18_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  TensorView* tv0 = makeConcreteTensor({5, 7, 11, 13});
+  fusion.addInput(tv0);
+
+  auto tv1 = set(tv0);
+
+  auto tv2 = makeConcreteTensor({5, 11});
+  fusion.addInput(tv2);
+
+  auto tv3 = broadcast(tv2, {false, true, false, true});
+  auto tv4 = add(tv3, tv1);
+  fusion.addOutput(tv4);
+
+  // // tv4[5, 7, 11, 13] = tv3[5, b1, 11, b3] + tv1[5, 7, 11, 13]
+  tv4->merge(0, 3);
+  // tv4[5*13, 7, 11]
+  tv4->split(0, 3);
+  // tv4[5*13//3, 3, 7, 11]
+  tv4->merge(2, 3)->split(2, 2);
+  // tv4[5*13//3, 3, 7*11//2, 2]
+  // tv4->merge(0, 2);
+  // // tv4[(5*13//3)*(7*11//2), 3, 2]
+
+  TransformPropagatorWithCheck propagator(tv4);
+  MaxRootDomainInfoSpanningTree(tv4).traverse(&propagator);
+  inlineAllAt(tv4, 1, false);
+  // std::cout<<tv4->definition()->toString()<<std::endl;
+  // fusion.print();
+  ComputeAtMap ca_map(&fusion);
+  // std::cout << ca_map.idGraph().loopNodes().toString() << std::endl;
+}
+
+// Repro for issue #1873
+TEST_F(NVFuserTest, FusionInlineBroadcastIndexing0_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeContigTensor(1);
+  auto tv1 = makeContigTensor(2);
+  fusion.addInput(tv0);
+  fusion.addInput(tv1);
+  auto tv2 = set(tv0);
+  auto tv3 = broadcast(tv2, {true, false});
+  auto tv4 = add(tv3, tv1);
+  fusion.addOutput(tv4);
+
+  tv4->merge(0);
+  tv4->split(0, 32);
+
+  tv0->computeAt(tv4, 1);
+
+  tv2->split(-1, 8);
+
+  auto options = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA, 0);
+  at::Tensor t0 = at::randn({123}, options);
+  at::Tensor t1 = at::randn({3, 123}, options);
+
+  FusionExecutor fe;
+  fe.compileFusion(&fusion, {t0, t1});
+
+  auto outputs = fe.runFusion({t0, t1});
+
+  auto tv_ref = t0 + t1;
+
+  testValidate(&fusion, outputs, {t0, t1}, {tv_ref}, __LINE__, __FILE__);
 }
 
 } // namespace jit
