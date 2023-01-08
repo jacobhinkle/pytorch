@@ -1318,7 +1318,11 @@ void IterDomainGraph::buildLoopPromotionMap() {
           continue;
         }
         if (resolved_bcast_merged_in.has(p_id)) {
-          loop_promotion_map_[p_id] = c_ids.back();
+          auto c_id = c_ids.back();
+          while (loop_promotion_map_.find(c_id) != loop_promotion_map_.end()) {
+            c_id = loop_promotion_map_.at(c_id);
+          }
+          loop_promotion_map_[p_id] = c_id;
         }
       }
     }
