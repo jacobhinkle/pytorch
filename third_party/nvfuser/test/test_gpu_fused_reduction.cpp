@@ -1738,7 +1738,6 @@ TEST_F(
 
   auto rf_tvs = tv5->rFactor({-2}, {tv5, tv9});
   auto tv5_rf = rf_tvs.at(0);
-  auto tv9_rf = rf_tvs.at(1);
 
   inlineMost(std::unordered_set<IterDomain*>{
       tv0_cache->axis(-1), tv1_cache->axis(-1)});
