@@ -55,7 +55,7 @@ class TORCH_CUDA_CU_API ConcretizedBroadcastDomains : private IterVisitor {
 
  private:
   //! Maps each root broadcast domain to its original root broadcast
-  //! domains. Their can be multiple original domains due to, e.g.,
+  //! domains. There can be multiple original domains due to, e.g.,
   //! binary ops with broadcast domains in both inputs.
   std::unordered_map<IterDomain*, std::unordered_set<IterDomain*>>
       broadcast_origin_map_;

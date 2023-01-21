@@ -16,6 +16,11 @@ namespace jit {
 namespace fuser {
 namespace cuda {
 
+using IdGroup = std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>;
+using IdGroups = VectorOfUniqueEntries<IdGroup>;
+using ExprGroup = std::shared_ptr<VectorOfUniqueEntries<Expr*>>;
+using ExprGroups = VectorOfUniqueEntries<ExprGroup>;
+
 IterDomainGraph::IterDomainGraph(
     const std::vector<Expr*>& exprs,
     const std::vector<TensorView*>& additional_tvs,
@@ -63,12 +68,12 @@ const DisjointSets<IterDomain*>& IterDomainGraph::getDisjointIdSets(
   return disjoint_ids_it->second;
 }
 
-std::pair<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>, bool>
-IterDomainGraph::getDisjointIdSet(IterDomain* id, IdMappingMode mode) const {
+std::pair<IdGroup, bool> IterDomainGraph::getDisjointIdSet(
+    IterDomain* id,
+    IdMappingMode mode) const {
   auto disjoint_mode_it = disjoint_ids_.find(mode);
 
-  auto null_return = std::make_pair(
-      std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>(nullptr), false);
+  auto null_return = std::make_pair(IdGroup(nullptr), false);
 
   if (disjoint_mode_it == disjoint_ids_.end()) {
     return null_return;
@@ -104,12 +109,12 @@ const DisjointSets<Expr*>& IterDomainGraph::getDisjointExprSets(
   return disjoint_exprs_it->second;
 }
 
-std::pair<std::shared_ptr<VectorOfUniqueEntries<Expr*>>, bool> IterDomainGraph::
-    getDisjointExprSet(Expr* expr, IdMappingMode mode) const {
+std::pair<ExprGroup, bool> IterDomainGraph::getDisjointExprSet(
+    Expr* expr,
+    IdMappingMode mode) const {
   auto disjoint_mode_it = disjoint_exprs_.find(mode);
 
-  auto null_return = std::make_pair(
-      std::shared_ptr<VectorOfUniqueEntries<Expr*>>(nullptr), false);
+  auto null_return = std::make_pair(ExprGroup(nullptr), false);
 
   if (disjoint_mode_it == disjoint_exprs_.end()) {
     return null_return;
@@ -263,10 +268,10 @@ void IterDomainGraph::mapIds(
   // them into a single group until we grab all definitions and uses for later
   // processing.
 
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>> defs0;
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>> defs1;
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>> uses0;
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>> uses1;
+  ExprGroups defs0;
+  ExprGroups defs1;
+  ExprGroups uses0;
+  ExprGroups uses1;
 
   auto group0 = disjointIdsSet(mode).disjointSetMap().at(id0);
   auto group1 = disjointIdsSet(mode).disjointSetMap().at(id1);
@@ -580,10 +585,7 @@ IterDomainGraph::buildMapBetween(
     const std::vector<IterDomain*>& from_ids,
     const std::vector<IterDomain*>& to_ids,
     IdMappingMode mode) const {
-  std::unordered_map<
-      IterDomain*,
-      std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-      from_ids2set;
+  std::unordered_map<IterDomain*, IdGroup> from_ids2set;
 
   for (auto from_id : from_ids) {
     auto from_disjoint_set_pair = getDisjointIdSet(from_id, mode);
@@ -595,10 +597,7 @@ IterDomainGraph::buildMapBetween(
 
   // Map from the sets associated with the IterDomains in to, to those iter
   // domains
-  std::unordered_map<
-      std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>,
-      VectorOfUniqueEntries<IterDomain*>>
-      set2to_ids;
+  std::unordered_map<IdGroup, VectorOfUniqueEntries<IterDomain*>> set2to_ids;
 
   for (auto to_id : to_ids) {
     auto to_disjoint_set_pair = getDisjointIdSet(to_id, mode);
@@ -643,15 +642,10 @@ IterDomainGraph::buildMapBetween(
   return buildMapBetween(from_ids.vector(), to_ids.vector(), mode);
 }
 
-std::pair<
-    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>,
-    bool>
-IterDomainGraph::iterDomainGroupDefinitions(
-    std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> id_group,
+std::pair<ExprGroups, bool> IterDomainGraph::getIterDomainGroupDefinitions(
+    IdGroup id_group,
     IdMappingMode mode) const {
-  auto null_return = std::make_pair(
-      VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>(),
-      false);
+  auto null_return = std::make_pair(ExprGroups(), false);
 
   if (id_group == nullptr) {
     return null_return;
@@ -670,15 +664,10 @@ IterDomainGraph::iterDomainGroupDefinitions(
   return std::make_pair(definition_it->second, true);
 }
 
-std::pair<
-    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>,
-    bool>
-IterDomainGraph::iterDomainGroupUses(
-    std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> id_group,
+std::pair<ExprGroups, bool> IterDomainGraph::getIterDomainGroupUses(
+    IdGroup id_group,
     IdMappingMode mode) const {
-  auto null_return = std::make_pair(
-      VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>(),
-      false);
+  auto null_return = std::make_pair(ExprGroups(), false);
 
   if (id_group == nullptr) {
     return null_return;
@@ -1112,8 +1101,7 @@ void IterDomainGraph::copyGraph(
 
       auto new_id_set = disjointIdsSet(to_mode).disjointSetMap().at(orig_id);
 
-      VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>
-          new_exprs;
+      ExprGroups new_exprs;
 
       for (auto orig_expr_set : orig_expr_sets.vector()) {
         auto orig_expr = orig_expr_set->front();
@@ -1139,7 +1127,7 @@ VectorOfUniqueEntries<IterDomain*> producerResolvedBroadcasts(
       PairwiseRootDomainMap(producer, consumer)
           .mapProducerToConsumer(producer->domain(), consumer->domain());
 
-  VectorOfUniqueEntries<IterDomain*> producer_resolved_bcasts;
+  VectorOfUniqueEntries<IterDomain*> producer_root_resolved_bcasts;
   for (const auto& kv : p2c_map) {
     auto p_id = kv.first;
     // Ignore non-broadcast dims
@@ -1152,11 +1140,59 @@ VectorOfUniqueEntries<IterDomain*> producerResolvedBroadcasts(
     if (c_id->isBroadcast() || c_id->isReduction()) {
       continue;
     }
-    producer_resolved_bcasts.pushBack(p_id);
+    producer_root_resolved_bcasts.pushBack(p_id);
   }
-  return producer_resolved_bcasts;
+  return producer_root_resolved_bcasts;
 }
 } // namespace
+
+ExprGroups IterDomainGraph::toGroups(
+    const VectorOfUniqueEntries<Expr*>& exprs,
+    IdMappingMode mode) const {
+  ExprGroups groups;
+  for (auto expr : exprs) {
+    auto disjoint_set_pair = getDisjointExprSet(expr, mode);
+    if (disjoint_set_pair.second) {
+      groups.pushBack(disjoint_set_pair.first);
+    }
+  }
+  return groups;
+}
+
+IdGroups IterDomainGraph::toGroups(
+    const VectorOfUniqueEntries<IterDomain*>& ids,
+    IdMappingMode mode) const {
+  IdGroups groups;
+  for (auto id : ids) {
+    auto disjoint_set_pair = getDisjointIdSet(id, mode);
+    if (disjoint_set_pair.second) {
+      groups.pushBack(disjoint_set_pair.first);
+    }
+  }
+  return groups;
+}
+
+IdGroups IterDomainGraph::outputGroups(ExprGroup expr, IdMappingMode mode)
+    const {
+  VectorOfUniqueEntries<IterDomain*> id_outputs;
+  for (auto id_output :
+       ir_utils::filterByType<IterDomain>(expr->front()->outputs())) {
+    id_outputs.pushBack(id_output);
+  }
+
+  return toGroups(id_outputs, mode);
+}
+
+IdGroups IterDomainGraph::inputGroups(ExprGroup expr, IdMappingMode mode)
+    const {
+  VectorOfUniqueEntries<IterDomain*> id_inputs;
+  for (auto id_input :
+       ir_utils::filterByType<IterDomain>(expr->front()->inputs())) {
+    id_inputs.pushBack(id_input);
+  }
+
+  return toGroups(id_inputs, mode);
+}
 
 void IterDomainGraph::buildLoopPromotionMap() {
   auto all_tvs = ir_utils::allTvs(FusionGuard::getCurFusion());
@@ -1200,13 +1236,13 @@ void IterDomainGraph::buildLoopPromotionMap() {
       }
     }
 
-    // Find all the broadcast domains in producer that are resolved in its
-    // consumers
-    VectorOfUniqueEntries<IterDomain*> producer_resolved_bcasts;
+    // Find all the broadcast domains in producer's root that are resolved in
+    // its consumers
+    VectorOfUniqueEntries<IterDomain*> producer_root_resolved_bcasts;
     auto consumers = ir_utils::consumerTvsOf(producer);
     for (auto consumer : consumers) {
       auto resolutions = producerResolvedBroadcasts(producer, consumer);
-      producer_resolved_bcasts.pushBack(resolutions);
+      producer_root_resolved_bcasts.pushBack(resolutions);
     }
 
     // At this point
@@ -1214,13 +1250,14 @@ void IterDomainGraph::buildLoopPromotionMap() {
     //      compute at position of the producer domain and the producer roots.
     // all_producer_ca_roots: Intersection of all_producer_ca_deps and
     //      producer's root
-    // producer_resolved_bcasts: IterDomains in producer root being resolved
+    // producer_root_resolved_bcasts: IterDomains in producer root being
+    // resolved
     //      with consumer.
 
     // Find all broadcasts in producer that are both resolved by a consumer and
     // are within the inlined dimensions (within compute at position)
     auto producer_ca_resolved_bcasts =
-        producer_resolved_bcasts.intersect(all_producer_ca_roots);
+        producer_root_resolved_bcasts.intersect(all_producer_ca_roots);
 
     bool merged_in_bcast_found = !producer_ca_resolved_bcasts.empty();
 
@@ -1237,6 +1274,9 @@ void IterDomainGraph::buildLoopPromotionMap() {
         if (p_ids.empty()) {
           continue;
         }
+
+        // Consumer id could have a broadcast merged in from one of its
+        // consumers. Need to propagate here.
         if (resolved_bcast_merged_in.has(c_id) &&
             all_producer_ca_deps.has(p_ids.back())) {
           resolved_bcast_merged_in.pushBack(p_ids.back());
@@ -1251,7 +1291,7 @@ void IterDomainGraph::buildLoopPromotionMap() {
       continue;
     }
 
-    // Grab expr history of iter domains in target_domain
+    // Grab expr history of iter domains in the producer
     std::vector<Expr*> producer_domain_exprs = StmtSort::getExprs(
         FusionGuard::getCurFusion(),
         std::vector<Val*>(producer_domain.begin(), producer_domain.end()));
@@ -1260,9 +1300,12 @@ void IterDomainGraph::buildLoopPromotionMap() {
       auto inp_ids = ir_utils::filterByType<IterDomain>(expr->inputs());
       auto out_ids = ir_utils::filterByType<IterDomain>(expr->outputs());
 
+      // Helper functions to propagate merged resolved bcast information forward
+      // through producer's history.
+
       // Input to expression has a broadcast that's resolved by producer's
       // consumer
-      auto inp_has_resolved_bcast = std::any_of(
+      auto inp_has_resolved_ca_bcast = std::any_of(
           inp_ids.begin(),
           inp_ids.end(),
           [&producer_ca_resolved_bcasts](IterDomain* id) {
@@ -1280,17 +1323,22 @@ void IterDomainGraph::buildLoopPromotionMap() {
             return resolved_bcast_merged_in.has(id);
           });
 
-      // One of the output iteration domains is not a broadcast. Helps prevent
-      // us from resolving expressions that are only comprised of broadcast iter
-      // domains.
-      auto out_is_not_bcast =
-          std::any_of(out_ids.begin(), out_ids.end(), [](IterDomain* id) {
-            return !id->isBroadcast();
-          });
-
-      if (inp_has_resolved_bcast) {
-        // If the input is a resolved broadcast, so are all the outputs
+      // producer_ca_resolved_bcasts starts as
+      // producer_root_resolved_bcasts.intersect(all_producer_ca_roots)
+      // propagate those resolved broadcasts forward through producer's history.
+      if (inp_has_resolved_ca_bcast) {
+        // If the input is a resolved broadcast, all the outputs of the
+        // expression do to
         producer_ca_resolved_bcasts.insert(out_ids.begin(), out_ids.end());
+      }
+
+      // If all of the expressions outputs in producer are broadcast, we don't
+      // need to promote this iter domain as it wouldn't impact indexing until
+      // we get an iter domain in producer that's not a broadcast.
+      if (std::all_of(out_ids.begin(), out_ids.end(), [](IterDomain* id) {
+            return id->isBroadcast();
+          })) {
+        continue;
       }
 
       // If the input has a resolved broadcast but one of the output domains is
@@ -1298,27 +1346,36 @@ void IterDomainGraph::buildLoopPromotionMap() {
       // resolved by consumer into another iteration domain. If the input
       // already has a merged resolved broadcast then all of the outputs do as
       // well.
-      if ((inp_has_resolved_bcast && out_is_not_bcast) ||
-          inp_has_merged_resolved_bcast) {
+      if (inp_has_resolved_ca_bcast || inp_has_merged_resolved_bcast) {
         resolved_bcast_merged_in.insert(out_ids.begin(), out_ids.end());
       }
     }
 
-    // Promote all iteration domains with a resolved broadcast merged in
+    // Promote all iteration domains with a resolved broadcast merged in.
+    // TODO: Consumers could have different resolutions of merged in broadcasts.
     for (auto consumer : consumers) {
       auto p2c_permissive_map = buildMapBetween(
           ir_utils::allIDsOf(producer),
           ir_utils::allIDsOf(consumer),
           IdMappingMode::PERMISSIVE);
 
-      for (auto entry : p2c_permissive_map) {
-        auto p_id = entry.first;
-        auto c_ids = entry.second;
-        if (c_ids.empty()) {
+      for (auto p_id : ir_utils::allIDsOf(producer)) {
+        auto p2c_it = p2c_permissive_map.find(p_id);
+
+        if (!resolved_bcast_merged_in.has(p_id)) {
           continue;
         }
-        if (resolved_bcast_merged_in.has(p_id)) {
-          auto c_id = c_ids.back();
+
+        if (p2c_it != p2c_permissive_map.end() && p2c_it->second.size() > 0) {
+          // Consumer has a matching domain, promote with the consumers domain.
+          // Use back of permissive map, not front. Grab the most replayed
+          // consumer ID that permissively maps.
+          //
+          // TODO: Reevaluate back vs front, and make sure it makes sense.
+          auto c_id = p2c_it->second.back();
+
+          // Don't just take the consumer id, promote through that id if it was
+          // also promoted.
           while (loop_promotion_map_.find(c_id) != loop_promotion_map_.end()) {
             c_id = loop_promotion_map_.at(c_id);
           }
@@ -1345,14 +1402,13 @@ bool ComputeAtMap::indexingReachableFrom(
     const VectorOfUniqueEntries<IterDomain*>& from,
     const VectorOfUniqueEntries<IterDomain*>& to) {
   // Convert inputs to exact disjoint sets
-  std::deque<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>> to_visit;
+  std::deque<IdGroup> to_visit;
   for (auto from_id : from) {
     to_visit.push_back(disjointSetOf(from_id, IdMappingMode::ALMOSTEXACT));
   }
 
   // Convert outputs to exact disjoint sets
-  std::unordered_set<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-      to_resolve;
+  std::unordered_set<IdGroup> to_resolve;
   for (auto to_id : to) {
     to_resolve.emplace(disjointSetOf(to_id, IdMappingMode::ALMOSTEXACT));
   }
@@ -1362,8 +1418,7 @@ bool ComputeAtMap::indexingReachableFrom(
     to_resolve.erase(entry);
   }
 
-  std::unordered_set<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-      visited;
+  std::unordered_set<IdGroup> visited;
   visited.insert(to_visit.begin(), to_visit.end());
 
   // Collect nodes if we can't process them in not_visited, if we end up
@@ -1375,12 +1430,12 @@ bool ComputeAtMap::indexingReachableFrom(
   //
   // Traversal is "backwards" so in_id's is actually expr->output
   // and out_id is actually expr->input
-  std::deque<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>> not_visited;
+  std::deque<IdGroup> not_visited;
   while (!to_visit.empty() && !to_resolve.empty()) {
     auto currently_visiting = to_visit.front();
     to_visit.pop_front();
 
-    auto defs_it = id_graph_.iterDomainGroupDefinitions(
+    auto defs_it = id_graph_.getIterDomainGroupDefinitions(
         currently_visiting, IdMappingMode::ALMOSTEXACT);
     if (!defs_it.second) {
       TORCH_INTERNAL_ASSERT(
@@ -1487,8 +1542,7 @@ void ComputeAtMap::testValidate() {
     }
 
     for (auto tv : all_tvs) {
-      VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-          tv_loop_domains;
+      IdGroups tv_loop_domains;
 
       // Grab the iter domains that should be used for the for loops.
       VectorOfUniqueEntries<IterDomain*> loop_ids;
@@ -1876,7 +1930,9 @@ IterDomain* ComputeAtMap::computeConcreteId(
   int max_bcast_root_count = 0;
 
   for (auto maybe_concrete_id : maybe_concrete_ids.vector()) {
-    auto concrete_id_root_sets = getInputDisjointSetsOf(maybe_concrete_id);
+    auto concrete_id_root_sets = getInputDisjointSetsOf(
+        id_graph_.getDisjointIdSet(maybe_concrete_id, IdMappingMode::EXACT)
+            .first);
 
     int bcast_root_count = std::count_if(
         concrete_id_root_sets.vector().begin(),
@@ -1944,9 +2000,9 @@ void ComputeAtMap::buildConsumersMap() {
 
 void ComputeAtMap::buildConcreteIds() {
   // For the exact map just select the first ID since they're all exactly the
-  // same size, it does not matter which is selected. This should be run-to-run
-  // deterministic but which ID gets selected her depends on the traversal
-  // order generating the set (compute at map build).
+  // same size, it does not matter which is selected. This should be
+  // run-to-run deterministic but which ID gets selected her depends on the
+  // traversal order generating the set (compute at map build).
   for (const auto& disjoint_set_shared_ptr :
        id_graph_.getDisjointIdSets(IdMappingMode::EXACT).disjointSets()) {
     TORCH_INTERNAL_ASSERT(
@@ -2094,8 +2150,8 @@ std::vector<IterDomain*> ComputeAtMap::getViewRfactorDomainsOfIdGroup(
   return rfactor_ids;
 }
 
-const std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> ComputeAtMap::
-    disjointSetOf(IterDomain* id, IdMappingMode mode) const {
+const IdGroup ComputeAtMap::disjointSetOf(IterDomain* id, IdMappingMode mode)
+    const {
   auto disjoint_set_pair = id_graph_.getDisjointIdSet(id, mode);
   TORCH_INTERNAL_ASSERT(
       disjoint_set_pair.second,
@@ -2105,24 +2161,22 @@ const std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> ComputeAtMap::
   return disjoint_set_pair.first;
 }
 
-VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-ComputeAtMap::getInputDisjointSetsOf(IterDomain* of_id, bool stop_at_rfactor) {
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-      input_disjoint_sets;
+IdGroups ComputeAtMap::getInputDisjointSetsOf(
+    IdGroup of_id,
+    bool stop_at_rfactor) {
+  IdGroups input_disjoint_sets;
 
   VectorOfUniqueEntries<IterDomain*> inputs;
   // This deque could be VectorOfUniqueEntries
-  std::deque<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>> to_visit(
-      {disjointSetOf(of_id, IdMappingMode::EXACT)});
-  std::unordered_set<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-      visited;
+  std::deque<IdGroup> to_visit({of_id});
+  std::unordered_set<IdGroup> visited;
   while (!to_visit.empty()) {
     auto currently_visiting = to_visit.front();
     to_visit.pop_front();
     if (!visited.emplace(currently_visiting).second) {
       continue;
     }
-    auto defs_pair = id_graph_.iterDomainGroupDefinitions(
+    auto defs_pair = id_graph_.getIterDomainGroupDefinitions(
         currently_visiting, IdMappingMode::EXACT);
 
     // If there's no definition, we've found an input.
@@ -2142,8 +2196,7 @@ ComputeAtMap::getInputDisjointSetsOf(IterDomain* of_id, bool stop_at_rfactor) {
 
     // Traverse producers of current disjoint set and collect unique exact
     // disjoint set producers
-    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-        producers_of_currently_visiting;
+    IdGroups producers_of_currently_visiting;
 
     for (auto def_group : defs_pair.first) {
       if (def_group->size() == 0) {
@@ -2168,16 +2221,12 @@ ComputeAtMap::getInputDisjointSetsOf(IterDomain* of_id, bool stop_at_rfactor) {
   return input_disjoint_sets;
 }
 
-VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-ComputeAtMap::getAllDisjointSetProducers(
-    const VectorOfUniqueEntries<
-        std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>& exact_sets) {
+IdGroups ComputeAtMap::getAllDisjointSetProducers(const IdGroups& exact_sets) {
   // This deque could be VectorOfUniqueEntries
-  std::deque<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>> to_visit(
+  std::deque<IdGroup> to_visit(
       {exact_sets.vector().begin(), exact_sets.vector().end()});
 
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-      visited;
+  IdGroups visited;
 
   while (!to_visit.empty()) {
     auto currently_visiting = to_visit.front();
@@ -2185,7 +2234,7 @@ ComputeAtMap::getAllDisjointSetProducers(
     if (!visited.pushBack(currently_visiting)) {
       continue;
     }
-    auto defs_pair = id_graph_.iterDomainGroupDefinitions(
+    auto defs_pair = id_graph_.getIterDomainGroupDefinitions(
         currently_visiting, IdMappingMode::EXACT);
 
     if (!defs_pair.second) {
@@ -2194,8 +2243,7 @@ ComputeAtMap::getAllDisjointSetProducers(
 
     // Traverse producers of current disjoint set and collect unique exact
     // disjoint set producers
-    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-        producers_of_currently_visiting;
+    IdGroups producers_of_currently_visiting;
 
     for (auto def_group : defs_pair.first) {
       if (def_group->size() == 0) {
@@ -2220,16 +2268,12 @@ ComputeAtMap::getAllDisjointSetProducers(
   return visited;
 }
 
-VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-ComputeAtMap::getAllDisjointSetConsumers(
-    const VectorOfUniqueEntries<
-        std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>& exact_sets) {
+IdGroups ComputeAtMap::getAllDisjointSetConsumers(const IdGroups& exact_sets) {
   // This deque could be VectorOfUniqueEntries
-  std::deque<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>> to_visit(
+  std::deque<IdGroup> to_visit(
       {exact_sets.vector().begin(), exact_sets.vector().end()});
 
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-      visited;
+  IdGroups visited;
 
   while (!to_visit.empty()) {
     auto currently_visiting = to_visit.front();
@@ -2237,8 +2281,8 @@ ComputeAtMap::getAllDisjointSetConsumers(
     if (!visited.pushBack(currently_visiting)) {
       continue;
     }
-    auto uses_pair =
-        id_graph_.iterDomainGroupUses(currently_visiting, IdMappingMode::EXACT);
+    auto uses_pair = id_graph_.getIterDomainGroupUses(
+        currently_visiting, IdMappingMode::EXACT);
 
     if (!uses_pair.second) {
       continue;
@@ -2246,8 +2290,7 @@ ComputeAtMap::getAllDisjointSetConsumers(
 
     // Traverse consumers of current disjoint set and collect unique exact
     // disjoint set consumers
-    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-        consumers_of_currently_visiting;
+    IdGroups consumers_of_currently_visiting;
 
     for (auto use_group : uses_pair.first) {
       if (use_group->size() == 0) {

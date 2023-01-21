@@ -13,6 +13,14 @@ namespace jit {
 namespace fuser {
 namespace cuda {
 
+using IdGroup = std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>;
+using IdGroups = VectorOfUniqueEntries<IdGroup>;
+using ExprGroup = std::shared_ptr<VectorOfUniqueEntries<Expr*>>;
+using ExprGroups = VectorOfUniqueEntries<ExprGroup>;
+
+// TODO: Remove, used for IdGraph friend access.
+class ComputeAtMap;
+
 // There's three modes of these iter domain mappings all uniquely important in
 // the lowering process.
 //
@@ -86,15 +94,15 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   //     (2) If the disjoint set of the provided Iter Domain in the proivded
   //       mapping mode exists
   //   }
-  std::pair<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>, bool>
-  getDisjointIdSet(IterDomain* id, IdMappingMode mode) const;
+  std::pair<IdGroup, bool> getDisjointIdSet(IterDomain* id, IdMappingMode mode)
+      const;
 
   // Returns the disjoint set according to one of the mapping mode types.
   const DisjointSets<Expr*>& getDisjointExprSets(IdMappingMode mode) const;
 
   // Same as getDisjointIdSet but for the Expression sets.
-  std::pair<std::shared_ptr<VectorOfUniqueEntries<Expr*>>, bool>
-  getDisjointExprSet(Expr* expr, IdMappingMode mode) const;
+  std::pair<ExprGroup, bool> getDisjointExprSet(Expr* expr, IdMappingMode mode)
+      const;
 
   // IterDomains are only allowed to be used once in the IterDomain graph,
   // id->uses() are not directly used as there's no bounds check that would
@@ -116,12 +124,38 @@ class TORCH_CUDA_CU_API IterDomainGraph {
     return self_mapping_info_.has_value();
   }
 
+  // Convert unique vector of expressions to unique vector of it's groups in
+  // provided mode
+  ExprGroups toGroups(
+      const VectorOfUniqueEntries<Expr*>& exprs,
+      IdMappingMode mode) const;
+
+  // Convert unique vector of IterDomain to unique vector of it's groups in
+  // provided mode
+  IdGroups toGroups(
+      const VectorOfUniqueEntries<IterDomain*>& ids,
+      IdMappingMode mode) const;
+
+  // Return input iter domain groups of provided expr in provided mode
+  IdGroups outputGroups(ExprGroup expr, IdMappingMode mode) const;
+
+  // Return output iter domain groups of provided expr in provided mode
+  IdGroups inputGroups(ExprGroup expr, IdMappingMode mode) const;
+
+  // Traverses uses of the IterDomains in 'of' and returns all IterDomain
+  // groups that depend on them in provided mapping mode.
+  ExprGroups allUsesOf(const IdGroups& of, IdMappingMode mode) const;
+
+  // Traverses definitions of the IterDomains in 'of' and returns all IterDomain
+  // groups 'of' IterDomains depend on in provided mapping mode.
+  ExprGroups allDefinitionsOf(const IdGroups& of, IdMappingMode mode) const;
+
   // Update the LOOP ID disjoint sets with resolved computeWith
   void updateComputeWith(TensorView* compute_with_tv);
 
   // Supports one to many mappings, uses the disjoint sets of the provided mode
-  // to produce mappings between from and to. If multiple iter domains in to map
-  // to a single iter domain in from, the order of the iter domains in value of
+  // to produce mappings between from and to. If multiple IterDomains in to map
+  // to a single iter domain in from, the order of the IterDomains in value of
   // the map is preserved to be the order provided in to.
   std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
   buildMapBetween(
@@ -146,19 +180,15 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   //! outer vector are expression groups that are not equivalent based on the
   //! provided mode, but produce one of the IterDomains within the same disjoint
   //! Iter Domain set based on the provided mode.
-  std::pair<
-      VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>,
-      bool>
-  iterDomainGroupDefinitions(
-      std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> id_group,
+  //! TODO: Change name to start with get
+  std::pair<ExprGroups, bool> getIterDomainGroupDefinitions(
+      IdGroup id_group,
       IdMappingMode mode) const;
 
-  //! Same as iterDomainGroupDefinitions but for uses instead of definitions
-  std::pair<
-      VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>,
-      bool>
-  iterDomainGroupUses(
-      std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> id_group,
+  //! Same as getIterDomainGroupDefinitions but for uses instead of definitions
+  //! TODO: Change name to start with get
+  std::pair<ExprGroups, bool> getIterDomainGroupUses(
+      IdGroup id_group,
       IdMappingMode mode) const;
 
   std::string toString() const;
@@ -192,7 +222,7 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // IterDomainGraph
   void initializeId(IterDomain* id, bool is_view_rfactor_id, bool is_leaf_id);
 
-  // Iterates over all Iter Domains in allTvs(fusion) computes
+  // Iterates over all IterDomains in allTvs(fusion) computes
   // is_view_rfactor_id, is_leaf_id and calls initializeID.
   void initialIdProcessing(const std::vector<TensorView*>& all_tvs);
 
@@ -266,18 +296,10 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Keeps a disjoint set entry for all Expressions for all mapping mode types.
   std::unordered_map<IdMappingMode, DisjointSets<Expr*>> disjoint_exprs_;
 
-  std::unordered_map<
-      IdMappingMode,
-      std::unordered_map<
-          std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>,
-          VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>>>
+  std::unordered_map<IdMappingMode, std::unordered_map<IdGroup, ExprGroups>>
       unique_definitions_;
 
-  std::unordered_map<
-      IdMappingMode,
-      std::unordered_map<
-          std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>,
-          VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<Expr*>>>>>
+  std::unordered_map<IdMappingMode, std::unordered_map<IdGroup, ExprGroups>>
       unique_uses_;
 
   // If multiple transformations occur IterDomains could have multiple uses,
@@ -285,7 +307,7 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // active IterDomain uses are, they can only be used once.
   std::unordered_map<IterDomain*, Expr*> id_uses_;
 
-  // Hold a set of iter domains that are considered view rfactor ids. This
+  // Hold a set of IterDomains that are considered view rfactor ids. This
   // identification is particularly important to understand if split operations
   // are divisible or not.
   std::unordered_set<IterDomain*> view_rfactor_ids_;
@@ -344,7 +366,7 @@ class TORCH_CUDA_CU_API ComputeAtMap {
   //! Returns an iter domain that is the maximum expanded size of all iter
   //! domains the one provided maps to. Useful for opening loops to the correct
   //! iteration size. Not guarenteed to return the same ID every call, but is
-  //! guarenteed to return iter domains in the same disjoint set.
+  //! guarenteed to return IterDomains in the same disjoint set.
   IterDomain* getConcreteMappedID(IterDomain* id, IdMappingMode mode) const;
 
   // Prints mapping information, forwards to an internal IterDomainGraph
@@ -375,9 +397,7 @@ class TORCH_CUDA_CU_API ComputeAtMap {
           DoubleBufferLoopStage::NotApplicable) const;
 
   // Simple alias to IterDomainGraph::getDisjointIdSet
-  const std::shared_ptr<VectorOfUniqueEntries<IterDomain*>> disjointSetOf(
-      IterDomain* id,
-      IdMappingMode mode) const;
+  const IdGroup disjointSetOf(IterDomain* id, IdMappingMode mode) const;
 
   // Update the LOOP map with resolved computeWith
   void updateComputeWith(TensorView* compute_with_tv);
@@ -387,26 +407,17 @@ class TORCH_CUDA_CU_API ComputeAtMap {
   // input ID's from provided ID. Returns all the exact map concrete IDs of the
   // exact sets that are inputs required to construct the exact concrete id of
   // of_id.
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-  getInputDisjointSetsOf(IterDomain* of_id, bool stop_at_rfactor = true);
+  IdGroups getInputDisjointSetsOf(IdGroup of_id, bool stop_at_rfactor = true);
 
-  // Traverses through definitions of exact maps (unique_exact_definitions_) to
-  // all input ID's from provided exact_sets. Returns all the exact map concrete
-  // IDs of all the exact sets that on the path to and including the inputs
-  // required to construct the exact concrete id of of_id.
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-  getAllDisjointSetProducers(
-      const VectorOfUniqueEntries<
-          std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>& exact_sets);
+  // Starts at exact_sets, traverses through defintions of the exact map to
+  // all terminating input ID's. Returns all the exact mapped groups of all the
+  // on these paths including the exact_sets.
+  IdGroups getAllDisjointSetProducers(const IdGroups& exact_sets);
 
-  // Traverses through uses of exact maps (unique_exact_uses_) to
-  // all input ID's from provided exact_sets. Returns all the exact map concrete
-  // IDs of all the exact sets that on the path to and including the inputs
-  // required to construct the exact concrete id of of_id.
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-  getAllDisjointSetConsumers(
-      const VectorOfUniqueEntries<
-          std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>& exact_sets);
+  // Starts at exact_sets, traverses through uses of the exact map to
+  // all terminating output ID's. Returns all the exact mapped groups of all the
+  // on these paths including the exact_sets.
+  IdGroups getAllDisjointSetConsumers(const IdGroups& exact_sets);
 
   // Build id_graph_
   void build(Fusion* fusion);
@@ -417,6 +428,7 @@ class TORCH_CUDA_CU_API ComputeAtMap {
 
   void buildConsumersMap();
 
+  // TODO: Rename to computeConcreteIds
   void buildConcreteIds();
 
   // Temporary pass to make sure loop promotion is working as anticipated. May
@@ -443,10 +455,7 @@ class TORCH_CUDA_CU_API ComputeAtMap {
   // mapping mode directly in this cache. const
   // VectorOfUniqueEntries<IterDomain*>& is what's returned by
   // ComputeAtMap::disjointSetOf which can be used directly.
-  std::unordered_map<
-      std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>,
-      IterDomain*>
-      concrete_id_cache_;
+  std::unordered_map<IdGroup, IterDomain*> concrete_id_cache_;
 
   // Permissive based map, input is a producer IterDomain and output is a list
   // of IterDomains in producer's consumers that permissively map. Primarily

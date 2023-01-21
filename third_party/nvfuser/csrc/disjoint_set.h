@@ -32,6 +32,8 @@ std::string abstractToString(T ref) {
 
 // Vector like class that will prevent adding duplicate entries by also
 // maintaing a set
+//
+// TODO: Can we support std::back_inserter with this class?
 template <typename T, typename Hash = std::hash<T>>
 class VectorOfUniqueEntries {
  public:
@@ -43,7 +45,18 @@ class VectorOfUniqueEntries {
     }
   }
 
-  // TODO: Add copy constructor
+  VectorOfUniqueEntries(const VectorOfUniqueEntries<T>& other) {
+    vector_ = other.vector();
+    set_ = other.set();
+  }
+
+  VectorOfUniqueEntries& operator=(const VectorOfUniqueEntries<T>& other) {
+    if (this != &other) {
+      vector_ = other.vector();
+      set_ = other.set();
+    }
+    return *this;
+  }
 
   template <class InputIt>
   VectorOfUniqueEntries(InputIt first, InputIt last) {
@@ -56,6 +69,15 @@ class VectorOfUniqueEntries {
   bool pushBack(T entry) {
     if (set_.emplace(entry).second) {
       vector_.push_back(entry);
+      return true;
+    }
+    return false;
+  }
+
+  // Returns if a node was actually added
+  bool pushFront(T entry) {
+    if (set_.emplace(entry).second) {
+      vector_.insert(vector_.begin(), entry);
       return true;
     }
     return false;
@@ -86,7 +108,7 @@ class VectorOfUniqueEntries {
   // Returns a new VectorOfUniqueEntries with entries that are in this but not
   // in other.
   VectorOfUniqueEntries<T, Hash> subtract(
-      const VectorOfUniqueEntries<T, Hash>& other) {
+      const VectorOfUniqueEntries<T, Hash>& other) const {
     VectorOfUniqueEntries<T, Hash> subtraction;
     for (auto entry : vector()) {
       if (!other.has(entry)) {
@@ -96,9 +118,25 @@ class VectorOfUniqueEntries {
     return subtraction;
   }
 
+  // Returns a new VectorOfUniqueEntries with entries that are either in this or
+  // other.
+  VectorOfUniqueEntries<T, Hash> computeUnion(
+      const VectorOfUniqueEntries<T, Hash>& other) const {
+    const VectorOfUniqueEntries<T, Hash>& this_ref = *this;
+    VectorOfUniqueEntries<T, Hash> union_(this_ref);
+    for (auto entry : other.vector()) {
+      union_.pushBack(entry);
+    }
+    return union_;
+  }
+
   // Returns a const vector useful for iterating on
   const std::vector<T>& vector() const {
     return vector_;
+  }
+
+  const std::unordered_set<T>& set() const {
+    return set_;
   }
 
   // Returns first element in vector
@@ -116,6 +154,14 @@ class VectorOfUniqueEntries {
     T v = vector_.back();
     set_.erase(v);
     vector_.pop_back();
+    return v;
+  }
+
+  // Remove and returns the last element in vector
+  T popFront() {
+    T v = vector_.back();
+    set_.erase(v);
+    vector_.erase(vector_.begin());
     return v;
   }
 
