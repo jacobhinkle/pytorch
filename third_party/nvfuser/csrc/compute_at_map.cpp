@@ -1732,12 +1732,17 @@ IterDomain* ComputeAtMap::computeConcreteId(
     return disjoint_set_shared_ptr->vector().front();
   }
 
+  // Store set to the id that's actually in the disjoint set we're looking at.
+  // This is only important for the loop concerete id detection as we want to
+  // make sure what we return is in the loop disjoint set.
+  std::unordered_map<IdGroup, IterDomain*> maybe_concrete_to_id;
+
   // Grab a set of candidate concrete_ids, we track towards the consumers in
   // the ID group as one of those is guaranteed to be a valid concrete id.
-  VectorOfUniqueEntries<IterDomain*> maybe_concrete_ids;
-  for (auto id : disjoint_set_shared_ptr->vector()) {
+  IdGroups maybe_concrete_ids;
+  for (auto disjoint_id : disjoint_set_shared_ptr->vector()) {
     bool id_output = true;
-    auto consumers_it = consumers_map_.find(id);
+    auto consumers_it = consumers_map_.find(disjoint_id);
     if (consumers_it != consumers_map_.end()) {
       for (auto consumer_id : consumers_it->second.vector()) {
         if (disjoint_set_shared_ptr->has(consumer_id)) {
@@ -1747,19 +1752,23 @@ IterDomain* ComputeAtMap::computeConcreteId(
       }
     }
     if (id_output) {
-      maybe_concrete_ids.pushBack(id);
+      auto disjoint_set_pair =
+          id_graph_.getDisjointIdSet(disjoint_id, IdMappingMode::EXACT);
+      TORCH_INTERNAL_ASSERT(disjoint_set_pair.second);
+      maybe_concrete_to_id[disjoint_set_pair.first] = disjoint_id;
+      maybe_concrete_ids.pushBack(disjoint_set_pair.first);
     }
   }
 
   // Shouldn't ever happen, it would mean there's an error somewhere in the
   // graph.
   TORCH_INTERNAL_ASSERT(
-      maybe_concrete_ids.vector().size() > 0,
+      maybe_concrete_ids.size() > 0,
       "No potential concrete_id's found for ",
       id->toString());
 
-  if (maybe_concrete_ids.vector().size() == 1) {
-    return maybe_concrete_ids.vector().front();
+  if (maybe_concrete_ids.size() == 1) {
+    return maybe_concrete_to_id.at(maybe_concrete_ids.front());
   }
 
   // Broadcast resolution is what we have to figure out here. So if we
@@ -1784,19 +1793,10 @@ IterDomain* ComputeAtMap::computeConcreteId(
   // Find any maybe concrete ID through the same iter/broadcast counting as
   // before as it should work fine.
 
-  VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-      maybe_concrete_exact_sets;
-
-  for (auto maybe_concrete_id : maybe_concrete_ids) {
-    maybe_concrete_exact_sets.pushBack(
-        disjointSetOf(maybe_concrete_id, IdMappingMode::EXACT));
-  }
-
   // Going to iteratively modify this to be all sets that the concrete ID
   // needs to cover
   VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-      all_exact_sets_covered =
-          getAllDisjointSetProducers(maybe_concrete_exact_sets);
+      all_exact_sets_covered = getAllDisjointSetProducers(maybe_concrete_ids);
 
   // Remove all broadcast domains that are resolved within the history of any
   // of the maybe concrete sets.
@@ -1843,17 +1843,8 @@ IterDomain* ComputeAtMap::computeConcreteId(
     auto all_resolved_broadcast_uses =
         getAllDisjointSetConsumers(resolved_broadcasts);
 
-    // Remove broadcast resolved sets from all_exact_sets_covered by
-    // effectively doing an inplace copy_if
-    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-        tmp_all_exact_sets_covered;
-    std::swap(tmp_all_exact_sets_covered, all_exact_sets_covered);
-    for (auto entry : tmp_all_exact_sets_covered) {
-      if (all_resolved_broadcast_uses.has(entry)) {
-        continue;
-      }
-      all_exact_sets_covered.pushBack(entry);
-    }
+    all_exact_sets_covered =
+        all_exact_sets_covered.subtract(all_resolved_broadcast_uses);
   }
 
   // Remove all domains in the history of sets marked as rfactor.
@@ -1883,42 +1874,23 @@ IterDomain* ComputeAtMap::computeConcreteId(
       }
     }
 
-    // Remove all sets in rfactor history from all_exact_sets_covered by
-    // effectively doing an inplace copy_if
-    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
-        tmp_all_exact_sets_covered;
-    std::swap(tmp_all_exact_sets_covered, all_exact_sets_covered);
-    for (auto entry : tmp_all_exact_sets_covered) {
-      if (produces_rfactor_dom.has(entry)) {
-        continue;
-      }
-      all_exact_sets_covered.pushBack(entry);
-    }
+    // Remove all sets in rfactor history from all_exact_sets_covered
+    all_exact_sets_covered =
+        all_exact_sets_covered.subtract(produces_rfactor_dom);
   }
+
+  maybe_concrete_ids = maybe_concrete_ids.intersect(all_exact_sets_covered);
 
   VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>
       input_ids;
 
-  {
-    // Remove any concrete id that's not still in all_exact_sets_covered,
-    // basically copy_if
-    decltype(maybe_concrete_ids) tmp_maybe_concrete_ids;
-    std::swap(maybe_concrete_ids, tmp_maybe_concrete_ids);
-    for (auto entry : tmp_maybe_concrete_ids) {
-      if (all_exact_sets_covered.has(
-              disjointSetOf(entry, IdMappingMode::EXACT))) {
-        maybe_concrete_ids.pushBack(entry);
-      }
-    }
-  }
-
   TORCH_INTERNAL_ASSERT(
-      maybe_concrete_ids.vector().size() > 0,
+      maybe_concrete_ids.size() > 0,
       "No potential concrete_id's found for disjoint set ",
       disjoint_set_shared_ptr->toString());
 
-  if (maybe_concrete_ids.vector().size() == 1) {
-    return maybe_concrete_ids.vector().front();
+  if (maybe_concrete_ids.size() == 1) {
+    return maybe_concrete_to_id.at(maybe_concrete_ids.front());
   }
 
   // The concrete_id should have the most roots it can trace back to that are
@@ -1930,9 +1902,7 @@ IterDomain* ComputeAtMap::computeConcreteId(
   int max_bcast_root_count = 0;
 
   for (auto maybe_concrete_id : maybe_concrete_ids.vector()) {
-    auto concrete_id_root_sets = getInputDisjointSetsOf(
-        id_graph_.getDisjointIdSet(maybe_concrete_id, IdMappingMode::EXACT)
-            .first);
+    auto concrete_id_root_sets = getInputDisjointSetsOf(maybe_concrete_id);
 
     int bcast_root_count = std::count_if(
         concrete_id_root_sets.vector().begin(),
@@ -1941,14 +1911,13 @@ IterDomain* ComputeAtMap::computeConcreteId(
           return set->vector()[0]->isBroadcast();
         });
 
-    int iter_root_count =
-        (int)concrete_id_root_sets.vector().size() - bcast_root_count;
+    int iter_root_count = (int)concrete_id_root_sets.size() - bcast_root_count;
     if (iter_root_count > max_iter_root_count ||
         (iter_root_count == max_iter_root_count &&
          bcast_root_count > max_bcast_root_count)) {
       max_iter_root_count = iter_root_count;
       max_bcast_root_count = bcast_root_count;
-      concrete_id = maybe_concrete_id;
+      concrete_id = maybe_concrete_to_id.at(maybe_concrete_id);
     }
   }
 
