@@ -159,7 +159,7 @@ class VectorOfUniqueEntries {
 
   // Remove and returns the last element in vector
   T popFront() {
-    T v = vector_.back();
+    T v = vector_.front();
     set_.erase(v);
     vector_.erase(vector_.begin());
     return v;

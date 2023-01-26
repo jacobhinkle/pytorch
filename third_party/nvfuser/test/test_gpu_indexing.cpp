@@ -823,10 +823,111 @@ TEST_F(NVFuserTest, FusionIndexing18_CUDA) {
   TransformPropagatorWithCheck propagator(tv4);
   MaxRootDomainInfoSpanningTree(tv4).traverse(&propagator);
   inlineAllAt(tv4, 1, false);
+  fusion.printKernel();
   // std::cout<<tv4->definition()->toString()<<std::endl;
   // fusion.print();
-  ComputeAtMap ca_map(&fusion);
+  // ComputeAtMap ca_map(&fusion);
   // std::cout << ca_map.idGraph().loopNodes().toString() << std::endl;
+}
+
+// TODO: Finish and enable test
+//
+// Create a case where we're missing a valid concrete id so the compute at map
+// processing will fail. We need to be able to create the concrete ID not just
+// look for one.
+TEST_F(NVFuserTest, FusionIndexing19_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeConcreteTensor({7});
+  fusion.addInput(tv0);
+
+  auto tv1 = set(tv0);
+
+  auto tv2 = broadcast(tv1, {false, true});
+
+  auto tv3 = makeConcreteTensor({7, 11});
+  auto tv4 = add(tv3, tv2);
+  auto tv5 = broadcast(tv4, {false, false, true});
+  // tv4[7, 11, 1]
+
+  auto tv6 = broadcast(tv1, {false, true});
+
+  auto tv7 = makeConcreteTensor({7, 13});
+  fusion.addInput(tv7);
+  auto tv8 = add(tv7, tv6);
+  auto tv9 = broadcast(tv8, {false, true, false});
+  // tv9[7, 1, 13]
+
+  auto tv10 = add(tv5, tv9);
+  fusion.addOutput(tv10);
+
+  // tv10[7, 11, 13]
+  tv10->merge(0)->merge(0);
+  // tv10[7*11*13]
+  tv10->split(0, 5)->split(0, 3);
+  // tv10[7*11*13//5//3, 3, 5]
+
+  TransformPropagatorWithCheck propagator(tv10);
+  MaxRootDomainInfoSpanningTree(tv10).traverse(&propagator);
+
+  std::vector<TensorView*> tensors_to_inline{tv1, tv2, tv4, tv6, tv8};
+  for (auto tensor : tensors_to_inline) {
+    tensor->inlineAt(1);
+  }
+
+  fusion.print();
+  fusion.printKernel();
+}
+
+// TODO: Finish and enable test
+//
+// Progressive loop promotion. producer gets promoted in consumer, consumer is
+// promoted in a different way to its consumer.
+TEST_F(NVFuserTest, FusionIndexing20_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeConcreteTensor({5});
+  fusion.addInput(tv0);
+
+  // [5]
+  auto tv1 = set(tv0);
+  auto tv2 = broadcast(tv1, {true, false});
+  // [1, 5]
+  auto tv3 = makeConcreteTensor({3, 5});
+  fusion.addInput(tv3);
+  auto tv4 = add(tv3, tv2);
+  // [3, 5]
+
+  auto tv5 = broadcast(tv4, {false, false, true});
+  // [3, 5, 1]
+  auto tv6 = makeConcreteTensor({3, 5, 7});
+  fusion.addInput(tv6);
+  auto tv7 = add(tv5, tv6);
+  // [3, 5, 7]
+  fusion.addOutput(tv7);
+
+  tv4->merge(0)->split(0, 3, false);
+  // [3, 5]
+  // [3, 3*5/3]
+
+  TransformPropagatorWithCheck propagator(tv4);
+  MaxRootDomainInfoSpanningTree(tv4).traverse(&propagator);
+
+  // tv0->tv1->tv2(b)->tv4->tv5(b)->tv7
+
+  tv1->inlineAt(1);
+  tv2->inlineAt(1);
+  tv4->inlineAt(1);
+
+  tv5->merge(1)->split(1, 5, false);
+  // [3, 3*5/3, 7]
+  tv7->merge(1)->split(1, 5, false);
+  // [3, 5, (3*5/3)*7/5]
+  tv5->inlineAt(2);
+
+  fusion.printKernel();
 }
 
 // Repro for issue #1873
@@ -862,6 +963,96 @@ TEST_F(NVFuserTest, FusionInlineBroadcastIndexing0_CUDA) {
   auto tv_ref = t0 + t1;
 
   testValidate(&fusion, outputs, {t0, t1}, {tv_ref}, __LINE__, __FILE__);
+}
+
+// Broadcast inline 3 times and merge all domains
+TEST_F(NVFuserTest, FusionMultiPromotion_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  int w = 3, x = 4, y = 7, z = 8;
+  auto options = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA, 0);
+
+  // [y]
+  auto tv0 = makeSymbolicTensor(1);
+  // [w, x, y, z]
+  auto tv1 = makeSymbolicTensor(4);
+  fusion.addInput(tv0);
+  fusion.addInput(tv1);
+
+  // y
+  auto tv2 = broadcast(tv0, {true, false});
+  // w, y, z
+  auto tv3 = broadcast(tv2, {false, false, true});
+  // w, y, z
+  auto tv4 = broadcast(tv3, {false, true, false, false});
+  // w, x, y, z
+  auto tv5 = add(tv4, tv1);
+
+  fusion.addOutput(tv5);
+
+  tv5->merge(1)->merge(1)->merge(0)->split(0, 11);
+
+  tv0->computeAt(tv5, 1);
+  tv1->computeAt(tv5, 1);
+
+  FusionExecutor fe;
+
+  at::Tensor t0 = at::randn({y}, options);
+  at::Tensor t1 = at::randn({w, x, y, z}, options);
+
+  auto t4 = t0.unsqueeze(0).unsqueeze(0).unsqueeze(-1);
+  auto aten_output = t4.add(t1);
+
+  std::vector<IValue> aten_inputs = {t0, t1};
+
+  fe.compileFusion(&fusion, aten_inputs);
+  auto cg_outputs = fe.runFusion(aten_inputs);
+
+  testValidate(
+      &fusion, cg_outputs, aten_inputs, {aten_output}, __LINE__, __FILE__);
+}
+
+// Broadcast and concretize same domain in two different ways and try to merge
+// their loops remains unsupported.
+TEST_F(NVFuserTest, FusionMultiPromotion2_CUDA) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+  // [w]
+  auto tv0 = makeSymbolicTensor(1);
+  fusion.addInput(tv0);
+
+  // [w, x]
+  auto tv1 = makeSymbolicTensor(2);
+  fusion.addInput(tv1);
+
+  // [w, y]
+  auto tv2 = makeSymbolicTensor(2);
+  fusion.addInput(tv2);
+
+  auto tv3 = set(tv0);
+  // [w]
+  auto tv4 = broadcast(tv3, {false, true});
+  // [w, 1]
+  auto tv5 = add(tv4, tv2);
+  // [w, x]
+  fusion.addOutput(tv5);
+
+  // [w]
+  auto tv6 = broadcast(tv3, {false, true});
+  // [w, 1]
+  auto tv7 = add(tv6, tv2);
+  // [y]
+
+  for (auto tv : std::vector<TensorView*>{tv4, tv5, tv6, tv7}) {
+    tv->merge(0);
+  }
+
+  for (auto tv : std::vector<TensorView*>{tv3, tv4, tv6}) {
+    tv->inlineAt(1);
+  }
+
+  ASSERT_ANY_THROW(fusion.printKernel());
 }
 
 } // namespace jit

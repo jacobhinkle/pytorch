@@ -104,10 +104,16 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   std::pair<ExprGroup, bool> getDisjointExprSet(Expr* expr, IdMappingMode mode)
       const;
 
-  // IterDomains are only allowed to be used once in the IterDomain graph,
-  // id->uses() are not directly used as there's no bounds check that would
-  // prevent a use from being defined that's not part of the actual fusion
-  // definition.
+  // IterDomains from the original fusion are only allowed to be used once in
+  // the IterDomain graph, id->uses() are not directly used as there's no bounds
+  // check that would prevent a use from being defined that's not part of the
+  // actual fusion definition.
+  //
+  // Note, any iter domains used during something like loop or concrete id
+  // resolution could actually have multiple Expr* uses, and uses on disjoint id
+  // sets should be used, not this.
+  //
+  // TODO: Can this be private?
   Expr* idUse(IterDomain* id) const;
 
   // TODO: Seems a bit unfortunate that this isn't IterDomain local information.
@@ -149,6 +155,14 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // Traverses definitions of the IterDomains in 'of' and returns all IterDomain
   // groups 'of' IterDomains depend on in provided mapping mode.
   ExprGroups allDefinitionsOf(const IdGroups& of, IdMappingMode mode) const;
+
+  // Return sorted expressions to go from the provided IterDomains in from to
+  // the provided IterDomains in to with provided mode. Minimal expressions to
+  // get from 'from' to 'to' returned.
+  ExprGroups getExprsBetween(
+      const IdGroups& from,
+      const IdGroups& to,
+      IdMappingMode mode) const;
 
   // Update the LOOP ID disjoint sets with resolved computeWith
   void updateComputeWith(TensorView* compute_with_tv);
@@ -201,7 +215,17 @@ class TORCH_CUDA_CU_API IterDomainGraph {
     return id;
   }
 
- private:
+  // Replay Expr but with the inputs provided. Input mapping will set a pairwise
+  // mapping between new_inputs and expr->inputs()
+  Expr* addReplayAs(
+      const std::vector<IterDomain*>& new_inputs,
+      Expr* expr,
+      IdMappingMode input_mapping);
+
+  // TODO: Remove protected, doing this now so compute at map can extend the
+  // iter domain graph.
+ protected:
+  friend ComputeAtMap;
   // Sometimes fusion inputs or outputs are disconnected from expressions, in
   // those cases we still may want to send in some additional tensor views from
   // the Fusion that don't have expressions associated with them.
@@ -426,6 +450,7 @@ class TORCH_CUDA_CU_API ComputeAtMap {
   // entry entry in  concrete_cache_id_
   IterDomain* computeConcreteId(IterDomain* id, IdMappingMode mode);
 
+  // TODO: remove or reimplemnt
   void buildConsumersMap();
 
   // TODO: Rename to computeConcreteIds
