@@ -1859,6 +1859,11 @@ void IterDomainGraph::buildLoopPromotionMap() {
     }
   }
 
+  // Even if there's no promotion, put into a promotion set.
+  for (auto id : ordered_p_ca_ids) {
+    promotion_sets.initializeSet(id);
+  }
+
   for (auto set : promotion_sets.disjointSets()) {
     IdGroups to_cover;
     for (auto entry : *set) {
@@ -1873,10 +1878,6 @@ void IterDomainGraph::buildLoopPromotionMap() {
   // can be across permissive mapping.
   std::unordered_map<IdGroup, IterDomain*> promotion_map;
 
-  auto promotionSet = [&](IterDomain* id) {
-    return promotion_sets.disjointSetMap().at(id);
-  };
-
   IdGroups promote_groups;
 
   // Exact groups in promote_Groups
@@ -1886,7 +1887,12 @@ void IterDomainGraph::buildLoopPromotionMap() {
   // promotion computation. We should fix this see comment in computing the
   // promoted ID.
   for (auto promote_id : ordered_p_ca_ids) {
-    promote_groups.pushBack(promotionSet(promote_id));
+    auto promoted_id_it = promotion_sets.disjointSetMap().find(promote_id);
+    TORCH_INTERNAL_ASSERT(
+        promoted_id_it != promotion_sets.disjointSetMap().end(),
+        promote_id->toString(),
+        " not found in promotion map.");
+    promote_groups.pushBack(promoted_id_it->second);
   }
 
   // Mark what's been promoted. When we search for expressions, no point in
