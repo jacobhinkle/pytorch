@@ -222,9 +222,9 @@ class TORCH_CUDA_CU_API IterDomainGraph {
       Expr* expr,
       IdMappingMode input_mapping);
 
-  // TODO: Remove protected, doing this now so compute at map can extend the
-  // iter domain graph.
  protected:
+  // TODO: Remove friend, instead compute at map should either be removed or
+  // inherit from IdGraph
   friend ComputeAtMap;
   // Sometimes fusion inputs or outputs are disconnected from expressions, in
   // those cases we still may want to send in some additional tensor views from

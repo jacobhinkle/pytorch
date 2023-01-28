@@ -16,11 +16,6 @@ namespace jit {
 namespace fuser {
 namespace cuda {
 
-using IdGroup = std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>;
-using IdGroups = VectorOfUniqueEntries<IdGroup>;
-using ExprGroup = std::shared_ptr<VectorOfUniqueEntries<Expr*>>;
-using ExprGroups = VectorOfUniqueEntries<ExprGroup>;
-
 IterDomainGraph::IterDomainGraph(
     const std::vector<Expr*>& exprs,
     const std::vector<TensorView*>& additional_tvs,
