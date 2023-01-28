@@ -193,6 +193,20 @@ HaloInfo::HaloInfo(Fusion* fusion, std::shared_ptr<const ComputeAtMap> ca_map)
     build(tv->domain());
   }
 
+  for (auto set : ca_map->idGraph()
+                      .getDisjointIdSets(IdMappingMode::EXACT)
+                      .disjointSets()) {
+    for (auto id : *set) {
+      if (!hasHaloWidth(id)) {
+        TORCH_WARN_ONCE(
+            "Halo not initialized. Needs to be fixed: ",
+            id->toString(),
+            " Setting halo to 0 to try, but test may fail.");
+        setHaloWidth(id, 0);
+      }
+    }
+  }
+
   if (isDebugDumpEnabled(DebugDumpOption::Halo)) {
     std::cout << toString() << std::endl;
   }
@@ -204,16 +218,8 @@ HaloInfo::HaloInfo(Fusion* fusion, std::shared_ptr<const ComputeAtMap> ca_map)
 }
 
 void HaloInfo::propagateRootAxisInfo(Expr* expr) {
-  for (auto output : expr->outputs()) {
-    auto out_tv = dynamic_cast<TensorView*>(output);
-    if (out_tv == nullptr) {
-      continue;
-    }
-    for (auto input : expr->inputs()) {
-      auto in_tv = dynamic_cast<TensorView*>(input);
-      if (in_tv == nullptr) {
-        continue;
-      }
+  for (auto out_tv : ir_utils::filterByType<TensorView>(expr->outputs())) {
+    for (auto in_tv : ir_utils::filterByType<TensorView>(expr->inputs())) {
       propagateRootAxisInfo(in_tv, out_tv, expr);
     }
   }
@@ -647,16 +653,27 @@ bool extentCompare(
 
   // It's invalid to compare two axes and when only either of them has
   // halo.
+  if (halo_map.hasHaloWidth(id1) != halo_map.hasHaloWidth(id2)) {
+    auto has_halo_str_id1 =
+        halo_map.hasHaloWidth(id1) ? " has halo " : " does not have halo ";
+    auto has_halo_str_id2 =
+        halo_map.hasHaloWidth(id2) ? " has halo " : " does not have halo ";
+    TORCH_INTERNAL_ASSERT(
+        halo_map.hasHaloWidth(id2),
+        "Invalid comparison: ",
+        id1,
+        has_halo_str_id1,
+        "and ",
+        id2,
+        has_halo_str_id2);
+  }
 
   if (halo_map.hasHaloWidth(id1)) {
-    TORCH_INTERNAL_ASSERT(
-        halo_map.hasHaloWidth(id2), "Invalid comparison: ", id1, " and ", id2);
     // Both axes have halo. We assume the axes themselves have equal
     // extents, excluding halo, as they are mapped with the CA
     // map. So, we just need to compare the halo width of each axis.
     return cmp(halo_map.getHaloWidth(id1), halo_map.getHaloWidth(id2));
   } else {
-    TORCH_INTERNAL_ASSERT(!halo_map.hasHaloWidth(id2));
     // Both don't have halo. The only case this can happen must be
     // both axes are the output of a merge expression, so each merge
     // input is recursively compared, and returns true only when both
