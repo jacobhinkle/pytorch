@@ -313,47 +313,55 @@ class DisjointSets {
   // belonging to entry0, maps all entries of disjoint set belonging to entry1
   // to entry0, removes original disjoint set belonging to entry1.
   void mapEntries(T entry0, T entry1) {
-    auto set_it_0 = disjoint_set_maps_.find(entry0);
-    auto set_it_1 = disjoint_set_maps_.find(entry1);
-
-    // Track if we need to reset iterators, optimize for case where both entries
-    // exist
-    bool invalid_iterators = false;
-    if (set_it_0 == disjoint_set_maps_.end()) {
-      initializeSet(entry0);
-      invalid_iterators = true;
-    }
-
-    if (set_it_1 == disjoint_set_maps_.end()) {
-      initializeSet(entry1);
-      invalid_iterators = true;
-    }
-
-    // TODO: We can avoid refinding one iterator if initialize set returns an
-    // iterator, though if we insert entry1 we'd have to refind entry0 as it
-    // could invalidate all iterators
-    if (invalid_iterators) {
-      set_it_0 = disjoint_set_maps_.find(entry0);
-      set_it_1 = disjoint_set_maps_.find(entry1);
-    }
-
-    auto set0_shared_ptr = set_it_0->second;
-    auto set1_shared_ptr = set_it_1->second;
-
-    // If the sets are already the same, do nothing
-    if (set0_shared_ptr == set1_shared_ptr) {
+    if (entry0 == entry1) {
       return;
     }
 
-    // Place everything in set1 into set0 and remap all entries in set1 to set0
-    for (auto entry : set1_shared_ptr->vector()) {
-      set0_shared_ptr->pushBack(entry);
-      disjoint_set_maps_[entry] = set0_shared_ptr;
+    auto set_it_0 = disjoint_set_maps_.find(entry0);
+    auto set_it_1 = disjoint_set_maps_.find(entry1);
+
+    auto set_0_found = set_it_0 != disjoint_set_maps_.end();
+    auto set_1_found = set_it_1 != disjoint_set_maps_.end();
+
+    // Sets already joined
+    if (set_0_found && set_1_found && set_it_0->second == set_it_1->second) {
+      return;
     }
 
-    // set1 no longer needed as its entries are copied into set0
-    disjoint_sets_.erase(std::find(
-        disjoint_sets_.begin(), disjoint_sets_.end(), set1_shared_ptr));
+    // Make and map new set
+    disjoint_sets_.push_back(
+        std::make_shared<VectorOfUniqueEntries<T, Hash>>());
+    auto new_set = disjoint_sets_.back();
+
+    if (set_0_found) {
+      auto set_0 = set_it_0->second;
+      for (auto set_0_entry : *set_0) {
+        TORCH_INTERNAL_ASSERT(set_0_entry != entry1);
+        new_set->pushBack(set_0_entry);
+        disjoint_set_maps_[set_0_entry] = new_set;
+      }
+      disjoint_sets_.erase(
+          std::find(disjoint_sets_.begin(), disjoint_sets_.end(), set_0));
+      // Erase invalidates iterators, regrab.
+      set_it_1 = disjoint_set_maps_.find(entry1);
+      set_1_found = set_it_1 != disjoint_set_maps_.end();
+    } else {
+      new_set->pushBack(entry0);
+      disjoint_set_maps_[entry0] = new_set;
+    }
+
+    if (set_1_found) {
+      auto set_1 = set_it_1->second;
+      for (auto set_1_entry : *set_1) {
+        new_set->pushBack(set_1_entry);
+        disjoint_set_maps_[set_1_entry] = new_set;
+      }
+      disjoint_sets_.erase(
+          std::find(disjoint_sets_.begin(), disjoint_sets_.end(), set_1));
+    } else {
+      new_set->pushBack(entry1);
+      disjoint_set_maps_[entry1] = new_set;
+    }
   }
 
   // Will assert if provided entry0 is not in any disjoint set, otherwise

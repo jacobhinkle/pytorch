@@ -113,8 +113,9 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // resolution could actually have multiple Expr* uses, and uses on disjoint id
   // sets should be used, not this.
   //
-  // TODO: Can this be private?
+  // TODO: Should these be private or removed?
   Expr* idUse(IterDomain* id) const;
+  Expr* idDef(IterDomain* id) const;
 
   // TODO: Seems a bit unfortunate that this isn't IterDomain local information.
   const std::unordered_set<IterDomain*>& viewRfactorIds() const {
@@ -239,8 +240,10 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   // ======= START Iteration domain build process in order called =======
 
-  // Fills id_uses_ for all IterDomains active in the fusion.
-  void buildIterDomainUses(const std::vector<TensorView*>& all_tvs);
+  // Fills id_uses_ and id_definitions_ for all IterDomains active in the
+  // fusion.
+  void buildIterDomainDefinitionsAndUses(
+      const std::vector<TensorView*>& all_tvs);
 
   // Initializes entries for the provided IterDomain in the overall
   // IterDomainGraph
@@ -288,6 +291,16 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   bool exprsMap(Expr* first, Expr* second, bool forward, IdMappingMode mode)
       const;
 
+  // If entry exists in id_definitions for provided group in provided mode,
+  // returns that entry, otherwise goes through all iter domains in the group
+  // and accumulates their id_definitions_ entries
+  ExprGroups getUniqueDefinitions(IdGroup group, IdMappingMode mode);
+
+  // If entry exists in id_uses for provided group in provided mode,
+  // returns that entry, otherwise goes through all iter domains in the group
+  // and accumulates their id_uses_ entries
+  ExprGroups getUniqueUses(IdGroup group, IdMappingMode mode);
+
   // Set id0 and id1 to mapped in disjointIdsSet[mode], update id0->definition()
   // and id1->definition() sets in disjointExprsSet.
   void mapIds(IterDomain* id0, IterDomain* id1, IdMappingMode mode);
@@ -327,9 +340,15 @@ class TORCH_CUDA_CU_API IterDomainGraph {
       unique_uses_;
 
   // If multiple transformations occur IterDomains could have multiple uses,
-  // however only one should be active in the given Fusion. Track what the
-  // active IterDomain uses are, they can only be used once.
-  std::unordered_map<IterDomain*, Expr*> id_uses_;
+  // however only one should be active in the given Fusion. When we resolve loop
+  // promotions during lowering, we can generate new iter domains from existing
+  // ones, so there can be multiple uses generated. Tracks all the active iter
+  // domain uses.
+  std::unordered_map<IterDomain*, VectorOfUniqueEntries<Expr*>> id_uses_;
+
+  // Make sure we don't blindly use definitions as we don't want to grab
+  // transformations before a tensor view's root domain.
+  std::unordered_map<IterDomain*, VectorOfUniqueEntries<Expr*>> id_definitions_;
 
   // Hold a set of IterDomains that are considered view rfactor ids. This
   // identification is particularly important to understand if split operations
