@@ -67,7 +67,7 @@ class ComputeAtMap;
 //          PERMISSIVE)
 //   Forward through split one axes, i.e. id{ceilDiv(i0, 1)}, id{i0} are mapped
 //
-class TORCH_CUDA_CU_API IterDomainGraph {
+class TORCH_CUDA_CU_API IterDomainGraph : public PolymorphicBase {
  public:
   IterDomainGraph(
       const std::vector<Expr*>& exprs,
@@ -208,13 +208,7 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   std::string toString() const;
 
-  auto getMaybePromoted(IterDomain* id) {
-    auto loop_entry_it = loop_promotion_map_.find(id);
-    if (loop_entry_it != loop_promotion_map_.end()) {
-      return loop_entry_it->second;
-    }
-    return id;
-  }
+  IterDomain* getLoopId(IterDomain* id);
 
   // Replay Expr but with the inputs provided. Input mapping will set a pairwise
   // mapping between new_inputs and expr->inputs()
@@ -222,6 +216,10 @@ class TORCH_CUDA_CU_API IterDomainGraph {
       const std::vector<IterDomain*>& new_inputs,
       Expr* expr,
       IdMappingMode input_mapping);
+
+  // Checks if the expression is a trivial operation where an input is simply an
+  // output of the transformation. Returns the mapped iter domains if found.
+  static std::vector<std::vector<IterDomain*>> isTrivialExpr(Expr* expr);
 
  protected:
   // TODO: Remove friend, instead compute at map should either be removed or
@@ -274,7 +272,14 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   // and first output of expr
   void buildLoopMap(const std::vector<Expr*>& exprs);
 
+  //! Run through disjoint sets in the LOOP map, make sure there's only one
+  //! non-serial parallel type in each disjoint set, set the parallel type of
+  //! all IterDomains in the disjoint set to that PType.
+  void validateAndPropagatePType() const;
+
   void buildLoopPromotionMap();
+
+  void buildIndexMap(const std::vector<TensorView*>& all_tvs);
 
   // ======= END Iteration domain build process in order called =======
 
@@ -283,6 +288,10 @@ class TORCH_CUDA_CU_API IterDomainGraph {
 
   // Non-const internal only version of getDisjointExprsSet.
   DisjointSets<Expr*>& disjointExprsSet(IdMappingMode mode);
+
+  // Maps expr0 and expr1 in the provided mapping mode. Also updates the
+  // unique_definitions_ and unique_uses_ map.
+  void mapExprs(Expr* expr0, Expr* expr1, IdMappingMode mode);
 
   // Returns if first and second are expressions through which the provided
   // id_map have matching inputs (if forward), or outputs (if not forward).
@@ -359,7 +368,9 @@ class TORCH_CUDA_CU_API IterDomainGraph {
   c10::optional<std::tuple<TensorView*, IterDomain*, IterDomain*, std::string>>
       self_mapping_info_ = c10::nullopt;
 
-  std::unordered_map<IterDomain*, IterDomain*> loop_promotion_map_;
+  std::unordered_map<IdGroup, IterDomain*> loop_promotion_map_;
+
+  std::unordered_map<IdGroup, Val*> index_map_;
 };
 
 using DoubleBufferIndices = std::unordered_map<DoubleBufferLoopStage, Int*>;
@@ -372,13 +383,6 @@ class TORCH_CUDA_CU_API ComputeAtMap {
   ComputeAtMap(ComputeAtMap&&) = default;
   ComputeAtMap& operator=(ComputeAtMap&&) = default;
   ComputeAtMap(Fusion* fusion);
-
-  //! Run through disjoint sets in the LOOP map, make sure there's only one
-  //! non-serial parallel type in each disjoint set, set the parallel type of
-  //! all IterDomains in the disjoint set to that PType.
-  //!
-  //! TODO: Should this be moved to parallel validation?
-  void validateAndPropagatePType();
 
   //! Run through disjoint sets in the LOOP map and allocate the index
   //!  variable for the associated for loop that will be generated
