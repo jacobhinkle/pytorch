@@ -33,6 +33,8 @@ namespace jit {
 namespace fuser {
 namespace cuda {
 
+class IndexMap;
+
 // TODO: we frequently use pairwise root mapping from consumers to producers.
 // This information is implicitly in the computeAtMaps, but there's no isolated
 // container for this information that we can reuse. Would be nice to generate
@@ -78,6 +80,11 @@ class TORCH_CUDA_CU_API GpuLower : public NonCopyable {
 
   std::shared_ptr<const ComputeAtMap> caMap() const {
     return std::const_pointer_cast<const ComputeAtMap>(compute_at_map_);
+  }
+
+
+  std::shared_ptr<const IndexMap> indexMap() const {
+    return std::const_pointer_cast<const IndexMap>(index_map_);
   }
 
   std::shared_ptr<const HaloInfo> haloInfo() const {
@@ -215,6 +222,8 @@ class TORCH_CUDA_CU_API GpuLower : public NonCopyable {
   std::shared_ptr<const SyncMap> sync_map_;
   kir::KernelPerformanceProfile profile_;
   std::unordered_set<Split*> divisible_splits_;
+
+  std::shared_ptr<IndexMap> index_map_;
 
   // Track which tensor views are inputs or outputs of a vectorized operation
   // and their maximum vectorized access size

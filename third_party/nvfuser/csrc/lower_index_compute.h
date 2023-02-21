@@ -1,12 +1,78 @@
 #pragma once
 
-#include <fusion.h>
+#include <disjoint_set.h>
+#include <dispatch.h>
 #include <index_compute.h>
+#include <ir_base_nodes.h>
 
 namespace torch {
 namespace jit {
 namespace fuser {
 namespace cuda {
+
+class ComputeAtMap;
+using IdGroup = std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>;
+using IdGroups =
+    VectorOfUniqueEntries<std::shared_ptr<VectorOfUniqueEntries<IterDomain*>>>;
+
+namespace kir {
+class Kernel;
+}
+
+// IdGroups on this class are based on IterDomainGraph's IdMappingMode::INDEX
+class IndexMap : public OptInConstDispatch {
+ public:
+  IndexMap(kir::Kernel* kernel, std::shared_ptr<const ComputeAtMap> ca_map);
+
+  // Returns index for provided iter domain in active memory type. Bool is
+  // true only if index exists and the returned Val* is valid.
+  std::pair<Val*, bool> getIndex(IdGroup index_group, MemoryType mem_type);
+
+  // Returns index for provided id in active memory type, will assert if index
+  // is not found.
+  Val* getAssertIndex(IdGroup index_group, MemoryType mem_type);
+
+ private:
+  void initializeIndices(IdGroups terminating_outputs);
+
+  using OptInConstDispatch::handle;
+
+  void handle(const Expr*) override;
+
+  void handle(const Split*) override;
+  void handle(const Merge*) override;
+  void handle(const Swizzle2D*) override;
+
+  IdGroup indexGroup(IterDomain* id);
+  bool isZero(IdGroup index_group);
+  bool hasZeroMerged(IdGroup index_group);
+  Val* getExtent(IdGroup index_group);
+
+  kir::Kernel* kernel_;
+  std::shared_ptr<const ComputeAtMap> ca_map_;
+
+  // Which memory type to store the results to as we iterate expressions.
+  MemoryType active_mem_type_;
+
+  std::unordered_map<MemoryType, std::unordered_map<IdGroup, Val*>> index_map_;
+
+  // Map from IterDomain to their broadcasted extent. If a TV has I0*I1 but its
+  // producer has B0*I1 this map will contain a mapping from the ID{B0*I1} to
+  // the extent I0*I1. Also contains updated extents if we merge in a 0 index.
+  // See zero_merged_in_.
+  std::unordered_map<MemoryType, std::unordered_map<IdGroup, Val*>> extent_map_;
+
+  // Keeps track of domains that do not contribute to indexing
+  std::unordered_map<MemoryType, std::unordered_set<IdGroup>> zero_domains_;
+
+  // This set keeps track of IterDomain's that have had a zero index merged into
+  // them. This happens if we do something like tv->axis(0)->split(4) then
+  // tv->computeAt(1, ...) if this tensor is in smem or lmem the backward
+  // indexing would be (0, i) then when we do the backward computation that zero
+  // and i would attempt to be merged together. We handle indices like these
+  // specially.
+  std::unordered_map<MemoryType, std::unordered_set<IdGroup>> zero_merged_in_;
+};
 
 // Struct to hold useful information from an index pass on iterdomain graph.
 // Used to return the IndexCompute structure back to the indexing calls in

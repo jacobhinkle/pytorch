@@ -211,11 +211,14 @@ class TORCH_CUDA_CU_API IterDomainGraph : public PolymorphicBase {
   IterDomain* getLoopId(IterDomain* id);
 
   // Replay Expr but with the inputs provided. Input mapping will set a pairwise
-  // mapping between new_inputs and expr->inputs()
+  // mapping between new_inputs and expr->inputs(). IterDomainGraphs will always
+  // be updated for exact, almost exact, and permissive maps. Loop
+  // IterDomainGraph will be updated only if include_loop_map.
   Expr* addReplayAs(
       const std::vector<IterDomain*>& new_inputs,
       Expr* expr,
-      IdMappingMode input_mapping);
+      IdMappingMode input_mapping,
+      bool include_loop_map = false);
 
   // Checks if the expression is a trivial operation where an input is simply an
   // output of the transformation. Returns the mapped iter domains if found.
@@ -245,7 +248,7 @@ class TORCH_CUDA_CU_API IterDomainGraph : public PolymorphicBase {
 
   // Initializes entries for the provided IterDomain in the overall
   // IterDomainGraph
-  void initializeId(IterDomain* id, bool is_view_rfactor_id, bool is_leaf_id);
+  void initializeId(IterDomain* id, bool is_view_rfactor_id);
 
   // Iterates over all IterDomains in allTvs(fusion) computes
   // is_view_rfactor_id, is_leaf_id and calls initializeID.
@@ -268,16 +271,19 @@ class TORCH_CUDA_CU_API IterDomainGraph : public PolymorphicBase {
   // AlmostExact entries, then map through broadcasts
   void buildPermissiveMap(const std::vector<Expr*>& exprs);
 
-  // Fills disjoint_ids_[IdMappingMode::LOOP] for relationships between inputs
-  // and first output of expr
-  void buildLoopMap(const std::vector<Expr*>& exprs);
-
   //! Run through disjoint sets in the LOOP map, make sure there's only one
   //! non-serial parallel type in each disjoint set, set the parallel type of
   //! all IterDomains in the disjoint set to that PType.
   void validateAndPropagatePType() const;
 
-  void buildLoopPromotionMap();
+  void buildLoopPromotionMap(const std::vector<Expr*>& exprs);
+
+  // Returns the terminal rfactor or input iter domains each group in the almost
+  // exact map covers (in the almost exact map). This effectively returns all
+  // the input almost exact iter domain groups for each almost exact iter domain
+  // group. RFactor axes are considered an "input" as all broadcast dimensions
+  // have to be resolved by or before the rfactor iter domain.
+  std::unordered_map<IdGroup, IdGroups> buildCoveredAlmostExact();
 
   void buildIndexMap(const std::vector<TensorView*>& all_tvs);
 

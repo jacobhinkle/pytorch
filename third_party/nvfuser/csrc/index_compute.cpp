@@ -317,9 +317,9 @@ Val* getProducerIndexWithPartialSplit(
 } // namespace
 
 void IndexCompute::handle(Split* split) {
-  auto in_id = maybeGetExactMapConcreteID(split->in()->as<IterDomain>());
-  auto outer_id = maybeGetExactMapConcreteID(split->outer()->as<IterDomain>());
-  auto inner_id = maybeGetExactMapConcreteID(split->inner()->as<IterDomain>());
+  auto in_id = maybeGetExactMapConcreteID(split->in());
+  auto outer_id = maybeGetExactMapConcreteID(split->outer());
+  auto inner_id = maybeGetExactMapConcreteID(split->inner());
 
   auto outer_it = index_map_.find(outer_id);
   auto inner_it = index_map_.find(inner_id);

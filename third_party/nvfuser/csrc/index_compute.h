@@ -77,6 +77,7 @@ class IndexCompute : public BackwardVisitor {
 
   //! True if a domain is not used to index
   bool isZero(IterDomain* id) const;
+
   //! True if any dependent of a domain is not used to index
   bool hasZeroMerged(IterDomain* id) const;
 

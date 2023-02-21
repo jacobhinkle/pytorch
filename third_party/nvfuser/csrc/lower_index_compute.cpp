@@ -1,17 +1,650 @@
 #include <contiguity.h>
+#include <fusion.h>
 #include <index_compute.h>
 #include <ir_utils.h>
+#include <kernel.h>
 #include <lower2device.h>
 #include <lower_index_compute.h>
 #include <lower_magic_zero.h>
 #include <lower_utils.h>
 #include <lower_validation.h>
+#include <swizzle.h>
 #include <transform_iter.h>
 
 namespace torch {
 namespace jit {
 namespace fuser {
 namespace cuda {
+
+namespace print_util2 {
+// A few compressed printing utilities to show critical uniqueness information.
+// i.e. being able to tell slight differences between groups we're working with.
+
+template <typename T>
+std::string ptrStringShort(const T* ptr) {
+  std::stringstream ss;
+  ss << ptr;
+  return "0x." + ss.str().substr(9);
+}
+
+std::string idGroupStringShort(const IdGroup& id_group) {
+  std::stringstream ss;
+  ss << ptrStringShort(id_group.get()) << "(idg){";
+  bool first = true;
+  for (auto id : *id_group) {
+    if (first) {
+      first = false;
+    } else {
+      ss << ", ";
+    }
+    ss << id->name();
+  }
+  ss << "}";
+  return ss.str();
+}
+
+std::string idGroupsStringShort(const IdGroups& id_groups) {
+  std::stringstream ss;
+  ss << ptrStringShort(&id_groups) << "(idgs){";
+  bool first = true;
+  for (auto id_group : id_groups) {
+    if (first) {
+      first = false;
+    } else {
+      ss << ", ";
+    }
+    ss << idGroupStringShort(id_group);
+  }
+  ss << "}";
+  return ss.str();
+}
+
+std::string exprGroupStringShort(ExprGroup expr) {
+  std::stringstream ss;
+  ss << ptrStringShort(expr.get()) << "(exprg){";
+  bool first = true;
+  for (auto expr_ : *expr) {
+    if (first) {
+      first = false;
+    } else {
+      ss << ", ";
+    }
+    ss << expr_->name();
+  }
+
+  ss << "}";
+  return ss.str();
+}
+
+std::string exprGroupStringShort(
+    const IterDomainGraph& id_graph,
+    ExprGroup expr_group,
+    IdMappingMode mode) {
+  std::stringstream ss;
+  auto inputs = id_graph.inputGroups(expr_group, mode);
+  auto outputs = id_graph.outputGroups(expr_group, mode);
+  ss << idGroupsStringShort(inputs) << " -" << exprGroupStringShort(expr_group)
+     << "-> " << idGroupsStringShort(outputs);
+  return ss.str();
+}
+
+std::string exprGroupsStringShort(
+    const IterDomainGraph& id_graph,
+    ExprGroups expr_groups,
+    IdMappingMode mode) {
+  std::stringstream ss;
+  ss << "{\n";
+  for (auto expr_group : expr_groups) {
+    ss << "  " << exprGroupStringShort(id_graph, expr_group, mode) << "\n";
+  }
+  ss << "}";
+  return ss.str();
+}
+
+std::string definitionsToString(
+    const IterDomainGraph& id_graph,
+    IdMappingMode mode) {
+  std::stringstream ss;
+  ss << "All index expr definitions in mode " << mode << ": " << std::endl;
+
+  for (auto id_group : id_graph.getDisjointIdSets(mode).disjointSets()) {
+    auto definition_pair =
+        id_graph.getIterDomainGroupDefinitions(id_group, mode);
+    ss << idGroupStringShort(id_group) << std::endl;
+    if (definition_pair.second) {
+      for (auto expr_group : definition_pair.first) {
+        ss << "  " << exprGroupStringShort(id_graph, expr_group, mode)
+           << std::endl;
+      }
+    }
+  }
+  return ss.str();
+}
+
+std::string usesToString(const IterDomainGraph& id_graph, IdMappingMode mode) {
+  std::stringstream ss;
+  ss << "All index expr uses in mode " << mode << ": " << std::endl;
+
+  for (auto id_group : id_graph.getDisjointIdSets(mode).disjointSets()) {
+    auto uses_pair = id_graph.getIterDomainGroupUses(id_group, mode);
+    ss << idGroupStringShort(id_group) << std::endl;
+    if (uses_pair.second) {
+      for (auto expr_group : uses_pair.first) {
+        ss << "  " << exprGroupStringShort(id_graph, expr_group, mode)
+           << std::endl;
+      }
+    }
+  }
+  return ss.str();
+}
+
+} // namespace print_util2
+
+IndexMap::IndexMap(
+    kir::Kernel* kernel,
+    std::shared_ptr<const ComputeAtMap> ca_map)
+    : kernel_(kernel), ca_map_(ca_map) {
+  IdGroups terminating_inputs;
+  IdGroups terminating_outputs;
+
+  for (auto index_entry : ca_map_->idGraph()
+                              .getDisjointIdSets(IdMappingMode::INDEX)
+                              .disjointSets()) {
+    auto uses_pair = ca_map_->idGraph().getIterDomainGroupUses(
+        index_entry, IdMappingMode::INDEX);
+    bool non_trivial_use = false;
+    if (uses_pair.second) {
+      for (auto use : uses_pair.first) {
+        auto first_expr = use->front();
+        if (IterDomainGraph::isTrivialExpr(first_expr).empty()) {
+          non_trivial_use = true;
+        }
+      }
+    }
+    if (!non_trivial_use) {
+      terminating_outputs.pushBack(index_entry);
+    }
+
+    auto defs_pair = ca_map_->idGraph().getIterDomainGroupDefinitions(
+        index_entry, IdMappingMode::INDEX);
+    bool non_trivial_def = false;
+    if (defs_pair.second) {
+      for (auto def : defs_pair.first) {
+        auto first_expr = def->front();
+        if (IterDomainGraph::isTrivialExpr(first_expr).empty()) {
+          non_trivial_def = true;
+        }
+      }
+    }
+    if (!non_trivial_def) {
+      terminating_inputs.pushBack(index_entry);
+    }
+  }
+
+  std::vector<MemoryType> memory_types{
+      MemoryType::Global, MemoryType::Shared, MemoryType::Local};
+
+  // Initialize maps:
+  for (auto mem_type : memory_types) {
+    index_map_[mem_type] = {};
+    extent_map_[mem_type] = {};
+    zero_domains_[mem_type] = {};
+    zero_merged_in_[mem_type] = {};
+  }
+
+  // kernel->as<Fusion>()->print();
+
+  // std::cout << "Loop map: " << std::endl;
+  // for (auto entry : ca_map_->idGraph()
+  //                       .getDisjointIdSets(IdMappingMode::LOOP)
+  //                       .disjointSets()) {
+  //   if (entry->size() > 1) {
+  //     std::cout << "  " << entry->toString() << std::endl;
+  //   }
+  // }
+
+  // std::cout << "Index map: " << std::endl;
+  // for (auto entry : ca_map_->idGraph()
+  //                       .getDisjointIdSets(IdMappingMode::INDEX)
+  //                       .disjointSets()) {
+  //   if (entry->size() > 1) {
+  //     std::cout << "  " << entry->toString() << std::endl;
+  //   }
+  // }
+
+  // std::cout << "Almost exact map: " << std::endl;
+  // for (auto entry : ca_map_->idGraph()
+  //                       .getDisjointIdSets(IdMappingMode::ALMOSTEXACT)
+  //                       .disjointSets()) {
+  //   if (entry->size() > 1) {
+  //     std::cout << "  " << entry->toString() << std::endl;
+  //   }
+  // }
+
+  initializeIndices(terminating_outputs);
+
+  std::cout << "Terminating inputs: " << std::endl;
+  for (auto inp : terminating_inputs) {
+    std::cout << print_util2::idGroupStringShort(inp) << std::endl;
+  }
+
+  std::cout << "Terminating outputs: " << std::endl;
+  for (auto out : terminating_outputs) {
+    std::cout << print_util2::idGroupStringShort(out) << std::endl;
+  }
+
+  // std::cout << "All Exact exprs" << std::endl;
+  // for (auto expr_group : ca_map_->idGraph()
+  //                            .getDisjointExprSets(IdMappingMode::EXACT)
+  //                            .disjointSets()) {
+  //   std::cout << print_util2::exprGroupStringShort(
+  //                    ca_map_->idGraph(), expr_group, IdMappingMode::EXACT)
+  //             << std::endl;
+  // }
+  // std::cout << std::endl;
+
+  // std::cout << "All index exprs" << std::endl;
+  // for (auto expr_group : ca_map_->idGraph()
+  //                            .getDisjointExprSets(IdMappingMode::INDEX)
+  //                            .disjointSets()) {
+  //   std::cout << print_util2::exprGroupStringShort(
+  //                    ca_map_->idGraph(), expr_group, IdMappingMode::EXACT)
+  //             << std::endl;
+  // }
+  // std::cout << std::endl;
+
+  auto all_uses =
+      ca_map_->idGraph().allUsesOf(terminating_inputs, IdMappingMode::INDEX);
+
+  auto all_definitions = ca_map_->idGraph().allDefinitionsOf(
+      terminating_outputs, IdMappingMode::INDEX);
+
+  auto all_exprs = all_uses.intersect(all_definitions);
+
+  // std::cout << all_uses.size() << " intersect " << all_definitions.size()
+  //           << " = " << all_exprs.size() << std::endl;
+
+  // std::cout << "Intersection: " << std::endl;
+  // for (auto expr : all_exprs) {
+  //   std::cout << print_util2::exprGroupStringShort(
+  //                    ca_map_->idGraph(), expr, IdMappingMode::EXACT)
+  //             << std::endl;
+  // }
+  // std::cout << std::endl;
+
+  // std::cout << "u - d: " << std::endl;
+  // for (auto expr : all_uses.subtract(all_definitions)) {
+  //   std::cout << print_util2::exprGroupStringShort(
+  //                    ca_map_->idGraph(), expr, IdMappingMode::EXACT)
+  //             << std::endl;
+  // }
+  // std::cout << std::endl;
+
+  // std::cout << "d - u: " << std::endl;
+  // for (auto expr : all_definitions.subtract(all_uses)) {
+  //   std::cout << print_util2::exprGroupStringShort(
+  //                    ca_map_->idGraph(), expr, IdMappingMode::EXACT)
+  //             << std::endl;
+  // }
+  // std::cout << std::endl;
+
+  // std::cout << "Intersection: " << std::endl;
+  // for (auto expr : all_exprs) {
+  //   std::cout << print_util2::exprGroupStringShort(
+  //                    ca_map_->idGraph(), expr, IdMappingMode::EXACT)
+  //             << std::endl;
+  // }
+  // std::cout << std::endl;
+
+  auto indexing_exprs =
+      ca_map_->idGraph()
+          .getExprsBetween(
+              terminating_inputs, terminating_outputs, IdMappingMode::INDEX)
+          .vector();
+
+  std::cout << "Forward ordered expressions: " << std::endl;
+  for (auto indexing_expr : indexing_exprs) {
+    std::cout << print_util2::exprGroupStringShort(
+                     ca_map_->idGraph(), indexing_expr, IdMappingMode::EXACT)
+              << std::endl;
+  }
+
+  std::reverse(indexing_exprs.begin(), indexing_exprs.end());
+
+  std::cout << "Backward ordered expressions: " << std::endl;
+  for (auto indexing_expr : indexing_exprs) {
+    std::cout << print_util2::exprGroupStringShort(
+                     ca_map_->idGraph(), indexing_expr, IdMappingMode::EXACT)
+              << std::endl;
+  }
+  std::cout << std::endl;
+
+  active_mem_type_ = MemoryType::Global;
+  for (auto indexing_expr : indexing_exprs) {
+    std::cout << "Handle:" << std::endl;
+    std::cout << "  " << indexing_expr->front()->toString();
+    handle(indexing_expr->front());
+  }
+
+  TORCH_INTERNAL_ASSERT(false);
+}
+
+void IndexMap::initializeIndices(IdGroups terminating_outputs) {
+  std::cout << "Initialize: " << std::endl;
+  // Run through all disjoint sets registered in loop map,
+  //  all lowered kir::ForLoop will correspond to one of the disjoint sets
+  //  and we only need one index variable for each set.
+  for (auto index_group : terminating_outputs) {
+    ParallelType ptype;
+    // first allocate thread and grid parallel indices:
+    //  The validation pass will check that the parallel bindings within the
+    //  loop disjoint IDs set are consistent so all the loops within this
+    //  disjoint set will be realized implicitly using parallel index
+    //  variables.
+    if (std::any_of(
+            index_group->begin(), index_group->end(), [&ptype](IterDomain* id) {
+              if (id->isThread() &&
+                  // Halo extended parallel loops currently are handled
+                  // differently and an index variable would still
+                  // be allocated in this case.
+                  (GpuLower::current()->haloInfo()->getExtent(id) == nullptr)) {
+                ptype = id->getParallelType();
+                return true;
+              }
+              return false;
+            })) {
+      index_map_[MemoryType::Global][index_group] =
+          NamedScalar::getParallelIndex(ptype);
+    } else if (std::all_of(
+
+                   // All loops in this set are non-parallel, non-concretized
+                   // broadcast
+                   //  iterdomains, their "index variable" should be zero.
+                   index_group->begin(),
+                   index_group->end(),
+                   [](IterDomain* id) { return id->isBroadcast(); })) {
+      index_map_[MemoryType::Global][index_group] = kernel_->zeroVal();
+    } else {
+      // TODO: Double buffered loops
+      // // Need to allocate double buffered loop differently.
+      // if (GpuLower::current()->doubleBufferInfo().isDoubleBufferedIterDomain(
+      //         concrete_loop_id)) {
+      //   // Allocate index variable for each stage of the double buffered
+      //   loop.
+      //   double_buffered_loop_index_variable_map_[loop_disjoint_set.get()] =
+      //       std::make_unique<DoubleBufferIndices>(DoubleBufferIndices(
+      //           {{DoubleBufferLoopStage::Prolog,
+      //             IrBuilder::create<Int>(c10::nullopt)},
+      //            {DoubleBufferLoopStage::Main,
+      //             IrBuilder::create<Int>(c10::nullopt)},
+      //            {DoubleBufferLoopStage::Epilog,
+      //             IrBuilder::create<Int>(c10::nullopt)}}));
+      // } else {
+      // Everything now should be serial concrete loops,
+      //   we just allocate a loop index integer for each set of loops.
+      index_map_[MemoryType::Global][index_group] =
+          IrBuilder::create<Int>(c10::nullopt);
+      // }
+    }
+
+    std::cout << index_map_[MemoryType::Global][index_group]->toString()
+              << "  <- " << index_group->toString() << std::endl;
+  }
+}
+
+IdGroup IndexMap::indexGroup(IterDomain* id) {
+  auto index_group_pair =
+      ca_map_->idGraph().getDisjointIdSet(id, IdMappingMode::INDEX);
+  TORCH_INTERNAL_ASSERT(
+      index_group_pair.second,
+      "No index group for iter domain: ",
+      id->toString());
+  return index_group_pair.first;
+}
+
+std::pair<Val*, bool> IndexMap::getIndex(
+    IdGroup index_group,
+    MemoryType mem_type) {
+  // TODO: If broadcast can we simply return 0?
+  auto& map = index_map_.at(mem_type);
+  auto index_it = map.find(index_group);
+  if (index_it == map.end()) {
+    return {nullptr, false};
+  }
+  return {index_it->second, true};
+}
+
+Val* IndexMap::getAssertIndex(IdGroup index_group, MemoryType mem_type) {
+  auto ind_pair = getIndex(index_group, mem_type);
+  TORCH_INTERNAL_ASSERT(
+      ind_pair.second,
+      "No entry for requested index group:\n  ",
+      index_group->toString(),
+      "\nin memory mode: ",
+      mem_type);
+  return ind_pair.first;
+}
+
+bool IndexMap::isZero(IdGroup index_group) {
+  auto& zero_set = zero_domains_.at(active_mem_type_);
+  return zero_set.find(index_group) != zero_set.end();
+}
+
+bool IndexMap::hasZeroMerged(IdGroup index_group) {
+  auto& zero_set = zero_merged_in_.at(active_mem_type_);
+  return zero_set.find(index_group) != zero_set.end();
+}
+
+Val* IndexMap::getExtent(IdGroup index_group) {
+  // TODO: If broadcast can we simply return 1?
+  auto& extent_map = extent_map_.at(active_mem_type_);
+  auto extent_it = extent_map.find(index_group);
+  if (extent_it != extent_map.end()) {
+    return extent_it->second;
+  }
+
+  // Almost exact should be a superset of index group, use that for consistent
+  // extents everywhere.
+  auto almost_exact_group_pair = ca_map_->idGraph().getDisjointIdSet(
+      index_group->front(), IdMappingMode::ALMOSTEXACT);
+  TORCH_INTERNAL_ASSERT(
+      almost_exact_group_pair.second,
+      "Missing IdGraph entry for: ",
+      index_group->front()->toString());
+  return almost_exact_group_pair.first->front()->extent();
+}
+
+void IndexMap::handle(const Expr* expr) {
+  // If all inputs are already indexed we don't need to do anything
+  auto inp_ids = ir_utils::filterByType<IterDomain>(expr->inputs());
+  for (auto inp_id : inp_ids) {
+    if (!getIndex(indexGroup(inp_id), active_mem_type_).second) {
+      OptInConstDispatch::handle(expr);
+      return;
+    }
+  }
+}
+
+void IndexMap::handle(const Split* split) {
+  auto in_id = indexGroup(split->in());
+  auto outer_id = indexGroup(split->outer());
+  auto inner_id = indexGroup(split->inner());
+
+  const auto outer_ind = getAssertIndex(outer_id, active_mem_type_);
+  const auto inner_ind = getAssertIndex(inner_id, active_mem_type_);
+
+  const bool outer_zero = isZero(outer_id);
+  const bool inner_zero = isZero(inner_id);
+
+  auto& index_map = index_map_.at(active_mem_type_);
+  auto& extent_map = extent_map_.at(active_mem_type_);
+  auto& zero_domains = zero_domains_.at(active_mem_type_);
+  auto& zero_merged_in = zero_merged_in_.at(active_mem_type_);
+
+  // We want to mark as zero merged in if we're working with shared or local
+  // memory, and the dimension we're working with is not part of the allocation,
+  // as we have special propagation rules for that scenario.
+
+  // Maybe clear in_id as it could have been mapped over from another
+  // IndexCompute. Uncertain if this is needed but seems to be safe.
+  bool is_zero_merged_in = hasZeroMerged(in_id) || hasZeroMerged(inner_id) ||
+      hasZeroMerged(outer_id);
+
+  // If both are zero, the split input is also zero
+  if (inner_zero && outer_zero) {
+    zero_domains.emplace(in_id);
+  }
+
+  if (is_zero_merged_in) {
+    zero_merged_in.emplace(in_id);
+  }
+
+  if (isZero(in_id)) {
+    index_map[in_id] = GpuLower::current()->kernel()->zeroVal();
+    extent_map[in_id] = GpuLower::current()->kernel()->zeroVal();
+  } else if (is_zero_merged_in && outer_zero) {
+    index_map[in_id] = inner_ind;
+    extent_map[in_id] = getExtent(inner_id);
+  } else if (is_zero_merged_in && inner_zero) {
+    index_map[in_id] = outer_ind;
+    extent_map[in_id] = getExtent(outer_id);
+  } else {
+    index_map[in_id] = SimplifyingIrBuilder::addExpr(
+        SimplifyingIrBuilder::mulExpr(outer_ind, getExtent(inner_id)),
+        inner_ind);
+    // The extent should be updated only when its allocation is
+    // partial, i.e., zero_merged_in is true. See PR #1270.
+    if (is_zero_merged_in) {
+      extent_map[in_id] = SimplifyingIrBuilder::mulExpr(
+          getExtent(outer_id), getExtent(inner_id));
+    }
+  }
+}
+
+void IndexMap::handle(const Merge* merge) {
+  auto out_id = indexGroup(merge->out());
+  auto outer_id = indexGroup(merge->outer());
+  auto inner_id = indexGroup(merge->inner());
+
+  auto out_ind = getAssertIndex(out_id, active_mem_type_);
+
+  auto zero = GpuLower::current()->kernel()->zeroVal();
+
+  auto& index_map = index_map_.at(active_mem_type_);
+  auto& extent_map = extent_map_.at(active_mem_type_);
+  auto& zero_domains = zero_domains_.at(active_mem_type_);
+  auto& zero_merged_in = zero_merged_in_.at(active_mem_type_);
+
+  if (isZero(out_id)) {
+    index_map[outer_id] = zero;
+    index_map[inner_id] = zero;
+    // TODO: Why do we set extent_map_ to zero? This has to be protected by zero
+    // merged in, but seems logical to me the extent would still be one.
+    extent_map[outer_id] = zero;
+    extent_map[inner_id] = zero;
+    zero_domains.emplace(outer_id);
+    zero_domains.emplace(inner_id);
+    return;
+  }
+
+  Val* inner_extent = getExtent(inner_id);
+  const auto outer_extent = getExtent(outer_id);
+
+  if (inner_id->front()->isBroadcast() && inner_extent->isOneInt()) {
+    // Propagate away from broadcast dims
+    index_map[outer_id] = out_ind;
+    index_map[inner_id] = zero;
+
+    extent_map[outer_id] = getExtent(out_id);
+    if (hasZeroMerged(out_id)) {
+      zero_merged_in.insert(outer_id);
+    }
+  } else if (outer_id->front()->isBroadcast() && outer_extent->isOneInt()) {
+    // Propagate away from broadcast dims
+    index_map[outer_id] = zero;
+    index_map[inner_id] = out_ind;
+
+    extent_map[inner_id] = getExtent(out_id);
+    if (hasZeroMerged(out_id)) {
+      zero_merged_in.insert(inner_id);
+    }
+  } else if (hasZeroMerged(out_id)) {
+    // Don't propagate to inner id if it's comprised of only broadcast root
+    // domains, unless outer is also all broadcast domains. Index shouldn't be
+    // anything but zero if both inner and outer are all broadcast domains, but
+    // didn't add a hard check for this. See Indexing5 test.
+    if (!inner_id->front()->isBroadcast() &&
+        !outer_id->front()->isBroadcast()) {
+      // If neither dimension is a broadcast (should be true for reference
+      // indexing) pick the preferred path or the inner path.
+      // Prop through inner
+      index_map[inner_id] = out_ind;
+      extent_map[inner_id] = getExtent(out_id);
+      index_map[outer_id] = zero;
+      extent_map[outer_id] = zero;
+      zero_domains.emplace(outer_id);
+    } else if (
+        inner_id->front()->isBroadcast() && !outer_id->front()->isBroadcast()) {
+      // Inner is broadcast and outer isn't, prop through outer
+      index_map[outer_id] = out_ind;
+      extent_map[outer_id] = getExtent(out_id);
+      index_map[inner_id] = zero;
+      extent_map[inner_id] = zero;
+      zero_domains.emplace(inner_id);
+    } else {
+      // Default to propagating through inner
+      index_map[inner_id] = out_ind;
+      extent_map[inner_id] = getExtent(out_id);
+      index_map[outer_id] = zero;
+      extent_map[outer_id] = zero;
+      zero_domains.emplace(outer_id);
+    }
+    zero_merged_in.emplace(inner_id);
+    zero_merged_in.emplace(outer_id);
+  } else {
+    index_map[outer_id] = SimplifyingIrBuilder::divExpr(out_ind, inner_extent);
+    index_map[inner_id] = SimplifyingIrBuilder::modExpr(out_ind, inner_extent);
+  }
+}
+
+void IndexMap::handle(const Swizzle2D* swizzle_2d) {
+  auto out_x_id = indexGroup(swizzle_2d->outX());
+  auto out_y_id = indexGroup(swizzle_2d->outY());
+  auto in_x_id = indexGroup(swizzle_2d->inX());
+  auto in_y_id = indexGroup(swizzle_2d->inY());
+
+  const auto out_x_ind = getAssertIndex(out_x_id, active_mem_type_);
+  const auto out_y_ind = getAssertIndex(out_y_id, active_mem_type_);
+
+  auto& index_map = index_map_.at(active_mem_type_);
+  auto& extent_map = extent_map_.at(active_mem_type_);
+
+  // TODO: Do we need zero merged in handling for this????
+  // auto& zero_domains = zero_domains_.at(active_mem_type_);
+  // auto& zero_merged_in = zero_merged_in_.at(active_mem_type_);
+
+  if (swizzle_2d->swizzleMode() == SwizzleMode::NoSwizzle) {
+    // Handle inactive swizzles by just passing through index
+    //  and extend information.
+
+    index_map[in_x_id] = out_x_ind;
+    index_map[in_y_id] = out_y_ind;
+    extent_map[in_y_id] = getExtent(out_y_id);
+    extent_map[in_x_id] = getExtent(out_x_id);
+  } else {
+    // Generate integer swizzle math if the
+    //  swizzle is activated. See also
+    //  [Note on swizzle mode].
+    std::pair<Val*, Val*> swizzled_index = dispatchSwizzle(
+        swizzle_2d->swizzleType(),
+        out_x_ind,
+        out_y_ind,
+        getExtent(out_x_id),
+        getExtent(out_y_id));
+    index_map[in_x_id] = swizzled_index.first;
+    index_map[in_y_id] = swizzled_index.second;
+  }
+}
 
 IndexFromIdGraph::IndexFromIdGraph(
     IndexCompute index_,

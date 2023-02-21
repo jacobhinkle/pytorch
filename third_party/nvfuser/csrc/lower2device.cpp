@@ -12,6 +12,7 @@
 #include <lower_expr_sort.h>
 #include <lower_fusion_simplifier.h>
 #include <lower_index.h>
+#include <lower_index_compute.h>
 #include <lower_insert_syncs.h>
 #include <lower_instrument.h>
 #include <lower_loops.h>
@@ -280,8 +281,6 @@ void GpuLower::lower(Fusion* fusion, DataType index_type) {
   if (isDebugDumpEnabled(DebugDumpOption::ComputeAtMap)) {
     std::cout << compute_at_map_->toString() << std::endl;
   }
-  compute_at_map_->validateAndPropagatePType();
-  dumpExprsIfEnabled(fusion_->exprs(), "validateAndPropagatePType", true);
 
   // Uses compute_at_map, find all splits that are enforced to be divisible
   divisible_splits_ = getAllDivisibleSplits(fusion_, compute_at_map_.get());
@@ -322,6 +321,8 @@ void GpuLower::lower(Fusion* fusion, DataType index_type) {
   // all IterDomains
   halo_info_ = std::make_shared<HaloInfo>(fusion_, compute_at_map_);
   dumpExprsIfEnabled(fusion_->exprs(), "build HaloInfo", true);
+
+  // index_map_ = std::make_shared<IndexMap>(kernel_.get(), caMap());
 
   // Want to run this after parallel map and halo info map are
   // created. vectorized_accesses_ and vectorized_set_info_ are filled.

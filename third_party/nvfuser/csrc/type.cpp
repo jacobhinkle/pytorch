@@ -733,6 +733,8 @@ static const char* id_map_mode_type2string(IdMappingMode t) {
       return "permissive";
     case IdMappingMode::LOOP:
       return "loop";
+    case IdMappingMode::INDEX:
+      return "index";
     default:
       // Don't try to print t as it would recursively call this function
       TORCH_INTERNAL_ASSERT(false, "Unexpected IdMappingMode Type.");
