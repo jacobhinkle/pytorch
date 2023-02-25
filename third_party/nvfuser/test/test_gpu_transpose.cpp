@@ -614,7 +614,7 @@ TEST_F(NVFuserTest, FusionTransposeSelfMapping_CUDA) {
   fusion.addOutput(tv2);
 
   EXPECT_THAT(
-      [&]() { IterDomainGraph(fusion_ptr.get()); },
+      [&]() { IterDomainGraphs(fusion_ptr.get()); },
       testing::ThrowsMessage<c10::Error>(
           testing::HasSubstr("Unsupported domain mapping detected")));
 

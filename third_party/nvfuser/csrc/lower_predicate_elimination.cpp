@@ -77,10 +77,12 @@ class PredicateAnalyzer : public OptOutDispatch {
       return true;
     }
 
-    auto c2p_id_map = GpuLower::current()->caMap()->idGraph().buildMapBetween(
-        ir_utils::allIDsOf(consumer),
-        ir_utils::allIDsOf(producer),
-        IdMappingMode::PERMISSIVE);
+    auto c2p_id_map =
+        GpuLower::current()
+            ->caMap()
+            ->idGraph(IdMappingMode::PERMISSIVE)
+            .buildMapBetween(
+                ir_utils::allIDsOf(consumer), ir_utils::allIDsOf(producer));
 
     PredicateAnalyzer analyzer(c2p_id_map);
 

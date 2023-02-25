@@ -158,7 +158,7 @@ void HaloInfo::setRootAxisInfo(
 HaloInfo::HaloInfo(Fusion* fusion, std::shared_ptr<const ComputeAtMap> ca_map)
     // Make a copy of the permissive map for extent comparators
     : permissive_map_(
-          ca_map->idGraph().getDisjointIdSets(IdMappingMode::PERMISSIVE)) {
+          ca_map->idGraph(IdMappingMode::PERMISSIVE).disjointIdSets()) {
   const auto vals = fusion->usedMathVals();
   auto tvs = ir_utils::filterByType<TensorView>(vals);
 
@@ -193,9 +193,8 @@ HaloInfo::HaloInfo(Fusion* fusion, std::shared_ptr<const ComputeAtMap> ca_map)
     build(tv->domain());
   }
 
-  for (auto set : ca_map->idGraph()
-                      .getDisjointIdSets(IdMappingMode::EXACT)
-                      .disjointSets()) {
+  for (auto set :
+       ca_map->idGraph(IdMappingMode::EXACT).disjointIdSets().disjointSets()) {
     for (auto id : *set) {
       if (!hasHaloWidth(id)) {
         TORCH_WARN_ONCE(

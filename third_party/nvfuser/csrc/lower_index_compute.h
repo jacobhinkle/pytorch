@@ -19,7 +19,7 @@ namespace kir {
 class Kernel;
 }
 
-// IdGroups on this class are based on IterDomainGraph's IdMappingMode::INDEX
+// IdGroups on this class are based on IterDomainGraphs' IdMappingMode::INDEX
 class IndexMap : public OptInConstDispatch {
  public:
   IndexMap(kir::Kernel* kernel, std::shared_ptr<const ComputeAtMap> ca_map);

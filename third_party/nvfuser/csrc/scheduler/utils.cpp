@@ -2091,8 +2091,9 @@ void BoundedDirectionalTransformPropagator::bothWays(
 
 DisjointSets<IterDomain*> disjointViewSets(Fusion* fusion) {
   // Start from the exact iter domain graph of the fusion
-  IterDomainGraph id_graph(fusion);
-  auto disjoint_view_ids = id_graph.getDisjointIdSets(IdMappingMode::EXACT);
+  IterDomainGraphs id_graphs(fusion);
+  auto disjoint_view_ids =
+      id_graphs.idGraph(IdMappingMode::EXACT).disjointIdSets();
 
   // If iter domains are involved in any transformation from root domains to
   // rfactor domains they should be considered "contaminated".
@@ -2232,9 +2233,7 @@ void propagateViewTransforms(Fusion* fusion, const ComputeAtMap& ca_map) {
 
   std::unordered_set<IterDomain*> terminating_rfactor_dims;
   for (const auto& disjoint_set_shared_ptr :
-       ca_map.idGraph()
-           .getDisjointIdSets(IdMappingMode::EXACT)
-           .disjointSets()) {
+       ca_map.idGraph(IdMappingMode::EXACT).disjointIdSets().disjointSets()) {
     if (std::none_of(
             disjoint_set_shared_ptr->vector().begin(),
             disjoint_set_shared_ptr->vector().end(),

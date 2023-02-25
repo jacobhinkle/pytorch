@@ -481,9 +481,7 @@ bool requiresForwardViewReplay(Fusion* fusion, ComputeAtMap& ca_map) {
   // tv1 root: [I0rf, I1rf, I2] -> rfactor [I0*I1rf, I2]
   // tv1 root: [I0, I1rf, I2rf] -> rfactor [I0, I1*I2rf]
   for (const auto& disjoint_set_shared_ptr :
-       ca_map.idGraph()
-           .getDisjointIdSets(IdMappingMode::EXACT)
-           .disjointSets()) {
+       ca_map.idGraph(IdMappingMode::EXACT).disjointIdSets().disjointSets()) {
     std::vector<IterDomain*> rfactor_ids;
 
     std::copy_if(
@@ -492,7 +490,7 @@ bool requiresForwardViewReplay(Fusion* fusion, ComputeAtMap& ca_map) {
         std::back_inserter(rfactor_ids),
         [&](IterDomain* id) {
           return id->isRFactorProduct() &&
-              ca_map.idGraph().idUse(id) != nullptr;
+              ca_map.idGraphs().idUse(id) != nullptr;
         });
 
     // Make sure there's at least one rfactor domain in the set, otherwise we
@@ -501,27 +499,27 @@ bool requiresForwardViewReplay(Fusion* fusion, ComputeAtMap& ca_map) {
       continue;
     }
 
-    auto first_use = ca_map.idGraph().idUse(rfactor_ids.front());
+    auto first_use = ca_map.idGraphs().idUse(rfactor_ids.front());
     auto first_use_pair =
-        ca_map.idGraph().getDisjointExprSet(first_use, IdMappingMode::EXACT);
+        ca_map.idGraph(IdMappingMode::EXACT).disjointExprSet(first_use);
 
     TORCH_INTERNAL_ASSERT(
         first_use_pair.second,
-        "IterDomainGraph not correctly built, could not find ",
+        "IterDomainGraphs not correctly built, could not find ",
         first_use->toString());
 
     for (auto other_id : rfactor_ids) {
-      auto other_use = ca_map.idGraph().idUse(other_id);
+      auto other_use = ca_map.idGraphs().idUse(other_id);
       if (other_use == first_use) {
         continue;
       }
 
       auto other_use_pair =
-          ca_map.idGraph().getDisjointExprSet(other_use, IdMappingMode::EXACT);
+          ca_map.idGraph(IdMappingMode::EXACT).disjointExprSet(other_use);
 
       TORCH_INTERNAL_ASSERT(
           other_use_pair.second,
-          "IterDomainGraph not correctly built, could not find ",
+          "IterDomainGraphs not correctly built, could not find ",
           other_use->toString());
 
       if (first_use_pair.first != other_use_pair.first) {
@@ -1906,7 +1904,7 @@ bool checkCanSchedule(
     if (!isConnectedFusionGraph(fusion)) {
       return false;
     }
-    if (IterDomainGraph(fusion->exprs(), /*allow_self_mapping=*/true)
+    if (IterDomainGraphs(fusion->exprs(), /*allow_self_mapping=*/true)
             .hasSelfMapping()) {
       return false;
     }

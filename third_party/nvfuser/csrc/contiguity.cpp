@@ -605,8 +605,8 @@ bool ContigIDs::isIndexable(IterDomain* id) const {
   // If ID is mapped to consumer through persmissive map but not exact map it
   // will not be mapped through to the exact map through the p2c map. Therefore
   // reject because it involves broadcast resolution.
-  if (!ca_map_->idGraph()
-           .getDisjointIdSets(IdMappingMode::EXACT)
+  if (!ca_map_->idGraph(IdMappingMode::EXACT)
+           .disjointIdSets()
            .mappingExists(getMappedId(id))) {
     return false;
   }

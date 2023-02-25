@@ -426,7 +426,7 @@ unsigned int getConsumerPosAlignedToProducerCA(
   // NVFuserTest.FusionComplexBCast1_CUDA
 
   TORCH_INTERNAL_ASSERT(consumer->definition() != nullptr);
-  IterDomainGraph id_graph({consumer->definition()});
+  IterDomainGraphs id_graphs({consumer->definition()});
 
   // Find the innermost position of consumer that has
   //  been mapped within the producer ca axis.
@@ -437,8 +437,9 @@ unsigned int getConsumerPosAlignedToProducerCA(
     if (std::any_of(
             p_dom.begin(),
             p_dom.begin() + producer_pos,
-            [&consumer_id, &id_graph](IterDomain* p_id) {
-              return id_graph.getDisjointIdSets(IdMappingMode::PERMISSIVE)
+            [&consumer_id, &id_graphs](IterDomain* p_id) {
+              return id_graphs.idGraph(IdMappingMode::PERMISSIVE)
+                  .disjointIdSets()
                   .permissiveAreMapped(consumer_id, p_id);
             })) {
       break;

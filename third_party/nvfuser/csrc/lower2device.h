@@ -82,7 +82,6 @@ class TORCH_CUDA_CU_API GpuLower : public NonCopyable {
     return std::const_pointer_cast<const ComputeAtMap>(compute_at_map_);
   }
 
-
   std::shared_ptr<const IndexMap> indexMap() const {
     return std::const_pointer_cast<const IndexMap>(index_map_);
   }

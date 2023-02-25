@@ -451,7 +451,7 @@ std::pair<TensorDomain*, unsigned int> TransformReplay::replayPasC(
       if (used_IDs.find(id) == used_IDs.end()) {
         new_IDs.push_back(id);
         used_IDs.emplace(id);
-        if(!mismatch_found){
+        if (!mismatch_found) {
           producer_pos = new_IDs.size();
         }
       }
@@ -784,7 +784,7 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
   }
 
   TORCH_INTERNAL_ASSERT(
-      reference_pos >= 0 && reference_pos <= (int) reference->nDims(),
+      reference_pos >= 0 && reference_pos <= (int)reference->nDims(),
       reference_pos,
       " is an invalid posiotion for ",
       reference->toString());
@@ -796,7 +796,7 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
 
   // Some logic still dependent on if producer or consumer (i.e. PasC vs CasP)
   //
-  // Would be nice if this was concisely captured in the IterDomainGraph
+  // Would be nice if this was concisely captured in the IterDomainGraphs
   const TensorView* producer = nullptr;
   const TensorView* consumer = nullptr;
 
@@ -832,12 +832,12 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
         target->toString());
   }
 
-  IterDomainGraph id_graph({definition_to_map});
+  IterDomainGraphs id_graphs({definition_to_map});
 
-  auto r2t_permissive_map = id_graph.buildMapBetween(
-      ir_utils::allIDsOf(reference),
-      ir_utils::allIDsOf(target),
-      IdMappingMode::PERMISSIVE);
+  auto r2t_permissive_map =
+      id_graphs.idGraph(IdMappingMode::PERMISSIVE)
+          .buildMapBetween(
+              ir_utils::allIDsOf(reference), ir_utils::allIDsOf(target));
 
   // The only dimensions we can actually skip in the replay is consumer
   // broadcast dimensions that don't map to any dimensions in producer.
@@ -848,13 +848,13 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
         skippable_root_dims.pushBack(c_root_id);
       }
     }
-    for(auto r2t_entry : r2t_permissive_map){
+    for (auto r2t_entry : r2t_permissive_map) {
       auto r_id = r2t_entry.first;
-      if(r2t_entry.second.empty()){
+      if (r2t_entry.second.empty()) {
         continue;
       }
       skippable_root_dims.erase(r_id);
-      for(auto t_id : r2t_entry.second){
+      for (auto t_id : r2t_entry.second) {
         skippable_root_dims.erase(t_id);
       }
     }
@@ -866,27 +866,27 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
         skippable_root_dims.pushBack(p_root_id);
       }
     }
-    for(auto r2t_entry : r2t_permissive_map){
+    for (auto r2t_entry : r2t_permissive_map) {
       auto r_id = r2t_entry.first;
-      if(r2t_entry.second.empty()){
+      if (r2t_entry.second.empty()) {
         continue;
       }
       skippable_root_dims.erase(r_id);
-      for(auto t_id : r2t_entry.second){
+      for (auto t_id : r2t_entry.second) {
         skippable_root_dims.erase(t_id);
       }
     }
   }
-  
+
   VectorOfUniqueEntries<IterDomain*> unskippable_root_dims;
-  for(auto r_root_id : reference_root){
-    if(!skippable_root_dims.has(r_root_id)){
+  for (auto r_root_id : reference_root) {
+    if (!skippable_root_dims.has(r_root_id)) {
       unskippable_root_dims.pushBack(r_root_id);
     }
   }
 
-  for(auto t_root_id : target_root){
-    if(!skippable_root_dims.has(t_root_id)){
+  for (auto t_root_id : target_root) {
+    if (!skippable_root_dims.has(t_root_id)) {
       unskippable_root_dims.pushBack(t_root_id);
     }
   }
@@ -949,7 +949,8 @@ int TransformReplay::getMatchedLeafPosWithoutReplayTasR(
     auto reference_id = *it_reference;
     auto target_id = *it_target;
 
-    if (id_graph.getDisjointIdSets(IdMappingMode::PERMISSIVE)
+    if (id_graphs.idGraph(IdMappingMode::PERMISSIVE)
+            .disjointIdSets()
             .permissiveAreMapped(reference_id, target_id)) {
       ++it_reference;
       ++it_target;

@@ -76,8 +76,8 @@ std::unordered_set<Split*> getAllDivisibleSplits(
       all_mapped_disjoint_expr_sets;
 
   for (auto divisible_split : all_divisible_splits) {
-    auto set_pair = ca_map->idGraph().getDisjointExprSet(
-        divisible_split, IdMappingMode::ALMOSTEXACT);
+    auto set_pair = ca_map->idGraph(IdMappingMode::ALMOSTEXACT)
+                        .disjointExprSet(divisible_split);
     if (set_pair.second) {
       all_mapped_disjoint_expr_sets.pushBack(set_pair.first);
     }

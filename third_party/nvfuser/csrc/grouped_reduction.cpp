@@ -17,9 +17,10 @@ namespace {
 bool hasMatchingTransformations(
     TensorView* ref,
     TensorView* other,
-    const IterDomainGraph& id_graph) {
+    const IterDomainGraphs& id_graphs) {
   for (const auto i : c10::irange(ref->nDims())) {
-    if (!id_graph.getDisjointIdSets(IdMappingMode::EXACT)
+    if (!id_graphs.idGraph(IdMappingMode::EXACT)
+             .disjointIdSets()
              .permissiveAreMapped(ref->axis(i), other->axis(i))) {
       return false;
     }
@@ -38,7 +39,7 @@ void validateReductionGrouping(
   TORCH_INTERNAL_ASSERT(
       fusion != nullptr, "Grouping of reductions must be done within a Fusion");
 
-  IterDomainGraph id_graph(fusion);
+  IterDomainGraphs id_graphs(fusion);
 
   // Pick the first output TV as a reference and compare it with the
   // rest. Do not allow grouping if any mismatch is detected.
@@ -108,7 +109,7 @@ void validateReductionGrouping(
     }
 
     TORCH_INTERNAL_ASSERT(
-        hasMatchingTransformations(ref_tv, output_tv, id_graph),
+        hasMatchingTransformations(ref_tv, output_tv, id_graphs),
         "Invalid grouped reduction due to mismatched transformations. ",
         "Reference tensor: ",
         ref_tv->toString(),

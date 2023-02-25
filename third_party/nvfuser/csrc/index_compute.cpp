@@ -1372,12 +1372,12 @@ std::vector<Val*> Index::getGlobalProducerStridedIndices(
   ir_utils::TVDomainGuard domain_guard(producer_tv, producerAsC);
 
   TORCH_INTERNAL_ASSERT(consumer_tv->definition() != nullptr);
-  IterDomainGraph id_graph({consumer_tv->definition()});
+  IterDomainGraphs id_graphs({consumer_tv->definition()});
 
-  auto c2p_map = makeOneToOne(id_graph.buildMapBetween(
-      ir_utils::allIDsOf(consumer_tv),
-      ir_utils::allIDsOf(producer_tv),
-      IdMappingMode::EXACT));
+  auto c2p_map = makeOneToOne(id_graphs.idGraph(IdMappingMode::EXACT)
+                                  .buildMapBetween(
+                                      ir_utils::allIDsOf(consumer_tv),
+                                      ir_utils::allIDsOf(producer_tv)));
 
   // Make sure at least root domains are mapped even when extents may
   // be different. This mapping is important for the indexing lookup
@@ -1619,12 +1619,12 @@ std::vector<Val*> Index::getNonGlobalProducerStridedIndices(
   std::unordered_map<IterDomain*, IterDomain*> p2c_index_map;
 
   TORCH_INTERNAL_ASSERT(consumer_tv->definition() != nullptr);
-  IterDomainGraph id_graph({consumer_tv->definition()});
+  IterDomainGraphs id_graphs({consumer_tv->definition()});
 
-  c2p_index_map = makeOneToOne(id_graph.buildMapBetween(
-      ir_utils::allIDsOf(consumer_tv),
-      ir_utils::allIDsOf(producer_tv),
-      IdMappingMode::EXACT));
+  c2p_index_map = makeOneToOne(id_graphs.idGraph(IdMappingMode::EXACT)
+                                   .buildMapBetween(
+                                       ir_utils::allIDsOf(consumer_tv),
+                                       ir_utils::allIDsOf(producer_tv)));
 
   p2c_index_map = invertOneToOneMap(c2p_index_map);
 
@@ -1822,9 +1822,9 @@ std::vector<Val*> Index::getPerDimLogicalIndex(
     TensorView* consumer_tv,
     const std::vector<kir::ForLoop*>& loops) {
   auto guard = ir_utils::overrideContiguityGuard(consumer_tv, false);
-  IndexFromIdGraph index_from_id_graph =
+  IndexFromIdGraph index_from_id_graphs =
       getTensorIndexFromIdGraph(loops, consumer_tv);
-  return getRootIndices(consumer_tv, loops, index_from_id_graph);
+  return getRootIndices(consumer_tv, loops, index_from_id_graphs);
 }
 
 std::vector<Val*> Index::getStrides(const TensorView* tv) {
@@ -1878,9 +1878,9 @@ std::vector<Val*> Index::getStrides(const TensorView* tv) {
 std::vector<Val*> Index::getRootIndices(
     const TensorView* tv,
     const std::vector<kir::ForLoop*>& loops,
-    const IndexFromIdGraph& index_from_id_graph) {
+    const IndexFromIdGraph& index_from_id_graphs) {
   auto root_dom = tv->getMaybeRFactorDomain();
-  auto indexing = index_from_id_graph.index;
+  auto indexing = index_from_id_graphs.index;
 
   std::vector<Val*> root_inds(
       root_dom.size(), GpuLower::current()->kernel()->zeroVal());
@@ -1914,10 +1914,10 @@ std::vector<Val*> Index::getGlobalConsumerStridedIndices(
     const std::vector<kir::ForLoop*>& loops) {
   FUSER_PERF_SCOPE("GpuLower::Lower::getGlobalConsumerIndex");
 
-  auto index_from_id_graph = getTensorIndexFromIdGraph(loops, consumer_tv);
-  auto consumer_indexing = index_from_id_graph.index;
+  auto index_from_id_graphs = getTensorIndexFromIdGraph(loops, consumer_tv);
+  auto consumer_indexing = index_from_id_graphs.index;
   auto strides = getStrides(consumer_tv);
-  auto root_inds = getRootIndices(consumer_tv, loops, index_from_id_graph);
+  auto root_inds = getRootIndices(consumer_tv, loops, index_from_id_graphs);
 
   // Global striding
   auto vectorize_shift =

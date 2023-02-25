@@ -93,19 +93,19 @@ std::string exprGroupStringShort(ExprGroup expr) {
 }
 
 std::string exprGroupStringShort(
-    const IterDomainGraph& id_graph,
+    const IterDomainGraphs& id_graph,
     ExprGroup expr_group,
     IdMappingMode mode) {
   std::stringstream ss;
-  auto inputs = id_graph.inputGroups(expr_group, mode);
-  auto outputs = id_graph.outputGroups(expr_group, mode);
+  auto inputs = id_graph.idGraph(mode).inputGroups(expr_group);
+  auto outputs = id_graph.idGraph(mode).outputGroups(expr_group);
   ss << idGroupsStringShort(inputs) << " -" << exprGroupStringShort(expr_group)
      << "-> " << idGroupsStringShort(outputs);
   return ss.str();
 }
 
 std::string exprGroupsStringShort(
-    const IterDomainGraph& id_graph,
+    const IterDomainGraphs& id_graph,
     ExprGroups expr_groups,
     IdMappingMode mode) {
   std::stringstream ss;
@@ -118,15 +118,15 @@ std::string exprGroupsStringShort(
 }
 
 std::string definitionsToString(
-    const IterDomainGraph& id_graph,
+    const IterDomainGraphs& id_graph,
     IdMappingMode mode) {
   std::stringstream ss;
   ss << "All Exprs registered as a definition in mode " << mode << ": "
      << std::endl;
   ExprGroups defs;
-  for (auto id_group : id_graph.getDisjointIdSets(mode).disjointSets()) {
+  for (auto id_group : id_graph.idGraph(mode).disjointIdSets().disjointSets()) {
     auto definition_pair =
-        id_graph.getIterDomainGroupDefinitions(id_group, mode);
+        id_graph.idGraph(mode).iterDomainGroupDefinitions(id_group);
     if (definition_pair.second) {
       for (auto expr_group : definition_pair.first) {
         defs.pushBack(expr_group);
@@ -139,12 +139,12 @@ std::string definitionsToString(
   return ss.str();
 }
 
-std::string usesToString(const IterDomainGraph& id_graph, IdMappingMode mode) {
+std::string usesToString(const IterDomainGraphs& id_graph, IdMappingMode mode) {
   std::stringstream ss;
   ss << "All Exprs registered as a use in mode " << mode << ": " << std::endl;
 
-  for (auto id_group : id_graph.getDisjointIdSets(mode).disjointSets()) {
-    auto uses_pair = id_graph.getIterDomainGroupUses(id_group, mode);
+  for (auto id_group : id_graph.idGraph(mode).disjointIdSets().disjointSets()) {
+    auto uses_pair = id_graph.idGraph(mode).iterDomainGroupUses(id_group);
     ss << idGroupStringShort(id_group) << std::endl;
     if (uses_pair.second) {
       for (auto expr_group : uses_pair.first) {
@@ -158,1308 +158,140 @@ std::string usesToString(const IterDomainGraph& id_graph, IdMappingMode mode) {
 
 } // namespace debug_print
 
-IterDomainGraph::IterDomainGraph(
-    const std::vector<Expr*>& exprs,
-    const std::vector<TensorView*>& additional_tvs,
-    bool allow_self_mapping) {
-  build(exprs, additional_tvs);
+IdGraph::IdGraph(const IdGraph& other) {
+  disjoint_ids_ = other.disjoint_ids_;
+  disjoint_exprs_ = other.disjoint_exprs_;
+  id_uses_ = other.id_uses_;
+  id_definitions_ = other.id_definitions_;
+  view_rfactor_ids_ = other.view_rfactor_ids_;
 
-  if (!allow_self_mapping) {
-    assertNoSelfMapping();
+  for (auto orig_unique_def_pair : other.unique_definitions_) {
+    auto orig_id_group = orig_unique_def_pair.first;
+    auto orig_expr_groups = orig_unique_def_pair.second;
+
+    auto new_id_group_pair = disjointIdSet(orig_id_group->front());
+    TORCH_INTERNAL_ASSERT(new_id_group_pair.second);
+    auto new_id_group = new_id_group_pair.first;
+
+    ExprGroups new_expr_groups;
+    for (auto orig_expr_group : orig_expr_groups) {
+      auto new_expr_group_pair = disjointExprSet(orig_expr_group->front());
+      TORCH_INTERNAL_ASSERT(new_expr_group_pair.second);
+      new_expr_groups.pushBack(new_expr_group_pair.first);
+    }
+
+    unique_definitions_[new_id_group] = new_expr_groups;
+  }
+
+  for (auto orig_unique_use_pair : other.unique_uses_) {
+    auto orig_id_group = orig_unique_use_pair.first;
+    auto orig_expr_groups = orig_unique_use_pair.second;
+
+    auto new_id_group_pair = disjointIdSet(orig_id_group->front());
+    TORCH_INTERNAL_ASSERT(new_id_group_pair.second);
+    auto new_id_group = new_id_group_pair.first;
+
+    ExprGroups new_expr_groups;
+    for (auto orig_expr_group : orig_expr_groups) {
+      auto new_expr_group_pair = disjointExprSet(orig_expr_group->front());
+      TORCH_INTERNAL_ASSERT(new_expr_group_pair.second);
+      new_expr_groups.pushBack(new_expr_group_pair.first);
+    }
+
+    unique_uses_[new_id_group] = new_expr_groups;
   }
 }
 
-IterDomainGraph::IterDomainGraph(
-    const std::vector<Expr*>& exprs,
-    bool allow_self_mapping)
-    : IterDomainGraph(exprs, {}, allow_self_mapping) {}
-
-IterDomainGraph::IterDomainGraph(Fusion* fusion, bool allow_self_mapping) {
-  std::vector<TensorView*> inputs_and_outputs;
-  {
-    auto inp_tvs = ir_utils::filterByType<TensorView>(fusion->inputs());
-    inputs_and_outputs.insert(
-        inputs_and_outputs.begin(), inp_tvs.begin(), inp_tvs.end());
-  }
-  {
-    auto out_tvs = ir_utils::filterByType<TensorView>(fusion->outputs());
-    inputs_and_outputs.insert(
-        inputs_and_outputs.begin(), out_tvs.begin(), out_tvs.end());
-  }
-
-  build(fusion->exprs(), inputs_and_outputs);
-
-  if (!allow_self_mapping) {
-    assertNoSelfMapping();
-  }
+IdGraph& IdGraph::operator=(const IdGraph& other) {
+  disjoint_ids_.clear();
+  disjoint_exprs_.clear();
+  unique_definitions_.clear();
+  unique_uses_.clear();
+  id_uses_.clear();
+  id_definitions_.clear();
+  view_rfactor_ids_.clear();
+  IdGraph copy(other);
+  std::swap(*this, copy);
+  return *this;
 }
 
-const DisjointSets<IterDomain*>& IterDomainGraph::getDisjointIdSets(
-    IdMappingMode mode) const {
-  auto disjoint_ids_it = disjoint_ids_.find(mode);
-  TORCH_INTERNAL_ASSERT(
-      disjoint_ids_it != disjoint_ids_.end(),
-      "Mapping mode ",
-      mode,
-      " not supported.");
-  return disjoint_ids_it->second;
+const DisjointSets<IterDomain*>& IdGraph::disjointIdSets() const {
+  return disjoint_ids_;
 }
 
-std::pair<IdGroup, bool> IterDomainGraph::getDisjointIdSet(
-    IterDomain* id,
-    IdMappingMode mode) const {
-  auto disjoint_mode_it = disjoint_ids_.find(mode);
+DisjointSets<IterDomain*>& IdGraph::disjointIdSets() {
+  return disjoint_ids_;
+}
 
-  auto null_return = std::make_pair(IdGroup(nullptr), false);
-
-  if (disjoint_mode_it == disjoint_ids_.end()) {
-    return null_return;
+std::pair<IdGroup, bool> IdGraph::disjointIdSet(IterDomain* id) const {
+  auto disjoint_set_it = disjoint_ids_.disjointSetMap().find(id);
+  if (disjoint_set_it == disjoint_ids_.disjointSetMap().end()) {
+    return std::make_pair(IdGroup(nullptr), false);
   }
-
-  const auto& disjoint_set = disjoint_mode_it->second;
-  auto disjoint_set_it = disjoint_set.disjointSetMap().find(id);
-  if (disjoint_set_it == disjoint_set.disjointSetMap().end()) {
-    return null_return;
-  }
-
   return std::make_pair(disjoint_set_it->second, true);
 }
 
-DisjointSets<IterDomain*>& IterDomainGraph::disjointIdsSet(IdMappingMode mode) {
-  auto disjoint_ids_it = disjoint_ids_.find(mode);
-  TORCH_INTERNAL_ASSERT(
-      disjoint_ids_it != disjoint_ids_.end(),
-      "Mapping mode ",
-      mode,
-      " not supported.");
-  return disjoint_ids_it->second;
+const DisjointSets<Expr*>& IdGraph::disjointExprSets() const {
+  return disjoint_exprs_;
 }
 
-const DisjointSets<Expr*>& IterDomainGraph::getDisjointExprSets(
-    IdMappingMode mode) const {
-  auto disjoint_exprs_it = disjoint_exprs_.find(mode);
-  TORCH_INTERNAL_ASSERT(
-      disjoint_exprs_it != disjoint_exprs_.end(),
-      "Mapping mode ",
-      mode,
-      " not supported.");
-  return disjoint_exprs_it->second;
+DisjointSets<Expr*>& IdGraph::disjointExprSets() {
+  return disjoint_exprs_;
 }
 
-std::pair<ExprGroup, bool> IterDomainGraph::getDisjointExprSet(
-    Expr* expr,
-    IdMappingMode mode) const {
-  auto disjoint_mode_it = disjoint_exprs_.find(mode);
-
-  auto null_return = std::make_pair(ExprGroup(nullptr), false);
-
-  if (disjoint_mode_it == disjoint_exprs_.end()) {
-    return null_return;
+std::pair<ExprGroup, bool> IdGraph::disjointExprSet(Expr* expr) const {
+  auto disjoint_set_it = disjoint_exprs_.disjointSetMap().find(expr);
+  if (disjoint_set_it == disjoint_exprs_.disjointSetMap().end()) {
+    return std::make_pair(ExprGroup(nullptr), false);
   }
-
-  const auto& disjoint_set = disjoint_mode_it->second;
-  auto disjoint_set_it = disjoint_set.disjointSetMap().find(expr);
-  if (disjoint_set_it == disjoint_set.disjointSetMap().end()) {
-    return null_return;
-  }
-
   return std::make_pair(disjoint_set_it->second, true);
 }
 
-DisjointSets<Expr*>& IterDomainGraph::disjointExprsSet(IdMappingMode mode) {
-  auto disjoint_exprs_it = disjoint_exprs_.find(mode);
-  TORCH_INTERNAL_ASSERT(
-      disjoint_exprs_it != disjoint_exprs_.end(),
-      "Mapping mode ",
-      mode,
-      " not supported.");
-  return disjoint_exprs_it->second;
-}
-
-Expr* IterDomainGraph::idUse(IterDomain* id) const {
-  auto use_it = id_uses_.find(id);
-  if (use_it == id_uses_.end()) {
-    return nullptr;
-  }
-  return use_it->second.front();
-}
-
-Expr* IterDomainGraph::idDef(IterDomain* id) const {
-  auto def_it = id_definitions_.find(id);
-  if (def_it == id_definitions_.end()) {
-    return nullptr;
-  }
-  return def_it->second.front();
-}
-
-void IterDomainGraph::mapExprs(Expr* expr0, Expr* expr1, IdMappingMode mode) {}
-
-bool IterDomainGraph::exprsMap(
-    Expr* first,
-    Expr* second,
-    bool forward,
-    IdMappingMode mode) const {
-  if (first == nullptr || second == nullptr) {
-    return false;
-  }
-
-  if (typeid(*first) != typeid(*second)) {
-    return false;
-  }
-
-  TORCH_INTERNAL_ASSERT(
-      first->isA<Merge>() || first->isA<Split>() || first->isA<Swizzle2D>(),
-      "Merge and split are the only expressions supported through rfactor operations in compute at map, but found:\n",
-      first->toString());
-
-  auto first_ids = ir_utils::filterByType<IterDomain>(
-                       forward ? first->inputs() : first->outputs())
-                       .vector();
-
-  auto second_ids = ir_utils::filterByType<IterDomain>(
-                        forward ? second->inputs() : second->outputs())
-                        .vector();
-
-  TORCH_INTERNAL_ASSERT(
-      first_ids.size() == second_ids.size(),
-      "Expected number of ",
-      (forward ? "inputs" : "outputs"),
-      " to match for\n",
-      first->toString(),
-      second->toString());
-
-  {
-    std::vector<std::pair<IterDomain*, IterDomain*>> zipped_ids;
-
-    std::transform(
-        first_ids.begin(),
-        first_ids.end(),
-        second_ids.begin(),
-        std::back_inserter(zipped_ids),
-        [](IterDomain* first, IterDomain* second) {
-          return std::make_pair(first, second);
-        });
-
-    if (std::any_of(
-            zipped_ids.begin(),
-            zipped_ids.end(),
-            [&](std::pair<IterDomain*, IterDomain*> id_pair) {
-              return !getDisjointIdSets(mode).permissiveAreMapped(
-                  id_pair.first, id_pair.second);
-            })) {
-      return false;
-    }
-  }
-
-  if (first->isA<Merge>() && !forward) {
-    // Can't back prop through merge without making sure one input actually
-    // matches. This can be done on a map or extent basis.
-    auto merge0 = first->as<Merge>();
-    auto merge1 = second->as<Merge>();
-
-    auto extent_0o = merge0->outer()->extent();
-    auto extent_0i = merge0->inner()->extent();
-    auto extent_1o = merge1->outer()->extent();
-    auto extent_1i = merge1->inner()->extent();
-
-    auto extent_0_match = extent_0o->sameAs(extent_1o) ||
-        (extent_0o->isConstInt() && extent_1o->isConstInt() &&
-         extent_0o->evaluateInt() == extent_1o->evaluateInt()) ||
-        getDisjointIdSets(mode).permissiveAreMapped(
-            merge0->outer(), merge1->outer());
-
-    auto extent_1_match = extent_0i->sameAs(extent_1i) ||
-        (extent_0i->isConstInt() && extent_1i->isConstInt() &&
-         extent_0i->evaluateInt() == extent_1i->evaluateInt()) ||
-        getDisjointIdSets(mode).permissiveAreMapped(
-            merge0->inner(), merge1->inner());
-
-    if (!(extent_0_match || extent_1_match)) {
-      return false;
-    }
-  }
-
-  if (first->isA<Split>()) {
-    auto first_split = first->as<Split>();
-    auto second_split = second->as<Split>();
-    if (!first_split->factor()->sameAs(second_split->factor()) ||
-        first_split->innerSplit() != second_split->innerSplit() ||
-        !first_split->startOffset()->sameAs(second_split->startOffset()) ||
-        !first_split->stopOffset()->sameAs(second_split->stopOffset())) {
-      return false;
-    }
-  }
-
-  if (first->isA<Swizzle2D>()) {
-    auto first_swizzle = first->as<Swizzle2D>();
-    auto second_swizzle = second->as<Swizzle2D>();
-    if (first_swizzle->swizzleMode() != second_swizzle->swizzleMode() ||
-        first_swizzle->swizzleType() != second_swizzle->swizzleType()) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-ExprGroups IterDomainGraph::getUniqueDefinitions(
-    IdGroup id_group,
-    IdMappingMode mode) {
-  auto unique_def_it = unique_definitions_.at(mode).find(id_group);
-  if (unique_def_it != unique_definitions_.at(mode).end()) {
-    return unique_def_it->second;
-  }
+ExprGroups IdGraph::toGroups(const VectorOfUniqueEntries<Expr*>& exprs) const {
   ExprGroups expr_groups;
-  for (auto id : *id_group) {
-    auto def_it = id_definitions_.find(id);
-    if (def_it == id_definitions_.end()) {
-      continue;
-    }
-    for (auto def : def_it->second) {
-      auto expr_group_pair = getDisjointExprSet(def, mode);
-      if (!expr_group_pair.second) {
-        continue;
-      }
-      expr_groups.pushBack(expr_group_pair.first);
-    }
-  }
-  return expr_groups;
-}
-
-ExprGroups IterDomainGraph::getUniqueUses(
-    IdGroup id_group,
-    IdMappingMode mode) {
-  auto unique_use_it = unique_uses_.at(mode).find(id_group);
-  if (unique_use_it != unique_uses_.at(mode).end()) {
-    return unique_use_it->second;
-  }
-  ExprGroups expr_groups;
-  for (auto id : *id_group) {
-    auto use_it = id_uses_.find(id);
-    if (use_it == id_uses_.end()) {
-      continue;
-    }
-    for (auto use : use_it->second) {
-      auto expr_group_pair = getDisjointExprSet(use, mode);
-      if (!expr_group_pair.second) {
-        continue;
-      }
-      expr_groups.pushBack(expr_group_pair.first);
-    }
-  }
-  return expr_groups;
-}
-
-void IterDomainGraph::mapIds(
-    IterDomain* id0,
-    IterDomain* id1,
-    IdMappingMode mode) {
-
-  if (disjointIdsSet(mode).strictAreMapped(id0, id1)) {
-    return;
-  }
-
-  // Definitions and uses are based on the groups of id0 and id1, don't merge
-  // them into a single group until we grab all definitions and uses for later
-  // processing.
-  auto orig_id_group0 = getDisjointIdSet(id0, mode).first;
-  auto orig_id_group1 = getDisjointIdSet(id1, mode).first;
-  ExprGroups orig_defs0 = getUniqueDefinitions(orig_id_group0, mode);
-  ExprGroups orig_defs1 = getUniqueDefinitions(orig_id_group1, mode);
-  ExprGroups orig_uses0 = getUniqueUses(orig_id_group0, mode);
-  ExprGroups orig_uses1 = getUniqueUses(orig_id_group1, mode);
-
-  // Map the iter domains together before we traverse across definitions and
-  // uses. Traversing definitions and uses could use the new property of id0 and
-  // id1 being mapped.
-  disjointIdsSet(mode).mapEntries(id0, id1);
-
-  // Record which expression to propagate across. We want to update the
-  // defintion and use maps before we propagating through other expressions.
-  std::vector<std::tuple<Expr*, Expr*, bool>> expr_prop;
-
-  // Propagate on definitions
-  if (orig_defs0.size() > 0 || orig_defs1.size() > 0) {
-    if (orig_defs0.size() > 0 && orig_defs1.size() > 0) {
-      for (auto def_group_1 : orig_defs1) {
-        if (orig_defs0.has(def_group_1)) {
-          continue;
-        }
-
-        for (auto def_group_0 : orig_defs0) {
-          auto def0 = def_group_0->front();
-          auto def1 = def_group_1->front();
-          if (exprsMap(def0, def1, false, mode)) {
-            disjointExprsSet(mode).mapEntries(def0, def1);
-            mapThroughExpr(def0, def1, false, mode);
-          }
-        }
-      }
-    }
-  }
-
-  // Propagate on uses
-  if (orig_uses0.size() > 0 || orig_uses1.size() > 0) {
-    if (orig_uses0.size() > 0 && orig_uses1.size() > 0) {
-      for (auto use_group_1 : orig_uses1) {
-        if (orig_uses0.has(use_group_1)) {
-          continue;
-        }
-
-        for (auto use_group_0 : orig_uses0) {
-          auto use0 = use_group_0->front();
-          auto use1 = use_group_1->front();
-          if (exprsMap(use0, use1, true, mode)) {
-            disjointExprsSet(mode).mapEntries(use0, use1);
-            mapThroughExpr(use0, use1, true, mode);
-          }
-        }
-      }
-    }
-  }
-
-  auto new_id_group = disjointIdsSet(mode).disjointSetMap().at(id0);
-
-  // Recompute definitions and uses
-  auto new_defs = getUniqueDefinitions(new_id_group, mode);
-  auto new_uses = getUniqueUses(new_id_group, mode);
-
-  // new_id_group could be one of the original id groups as part of the mapping
-  // process, so erase first then add. Otherwise we could erase what we just
-  // added.
-  unique_definitions_[mode].erase(orig_id_group0);
-  unique_definitions_[mode].erase(orig_id_group1);
-  unique_uses_[mode].erase(orig_id_group0);
-  unique_uses_[mode].erase(orig_id_group1);
-
-  unique_definitions_[mode][new_id_group] = new_defs;
-  unique_uses_[mode][new_id_group] = new_uses;
-}
-
-// Given first and second Exprs "match"
-//   Expr type matches
-//   IterDomain's in the inputs and outputs exact match, (including argument
-//     position positions)
-//   Paramters like Split's factor "match" (exact match on integers could be
-//     better, as today it will just check it's the same symbol or evaluated
-//     to the same constant. However, we know all the extents of all the
-//     IterDomain's that exact map with eachother are the same value.
-bool IterDomainGraph::mapThroughExpr(
-    Expr* first,
-    Expr* second,
-    bool forward,
-    IdMappingMode mode) {
-  if (first == nullptr || second == nullptr) {
-    return false;
-  }
-
-  if (!exprsMap(first, second, forward, mode)) {
-    return false;
-  }
-
-  auto first_ids = ir_utils::filterByType<IterDomain>(
-                       forward ? first->outputs() : first->inputs())
-                       .vector();
-  auto second_ids = ir_utils::filterByType<IterDomain>(
-                        forward ? second->outputs() : second->inputs())
-                        .vector();
-  TORCH_INTERNAL_ASSERT(
-      first_ids.size() == second_ids.size(),
-      "This should be unreachable, if transformation expressions match, their number of inputs and outputs should as well.\n However found:\n",
-      first->toString(),
-      "\nand\n",
-      second->toString());
-  for (auto out_i : c10::irange(first_ids.size())) {
-    mapIds(first_ids[out_i], second_ids[out_i], mode);
-  }
-
-  return true;
-}
-
-void IterDomainGraph::assertNoSelfMapping() {
-  TORCH_INTERNAL_ASSERT(
-      !hasSelfMapping(),
-      "Unsupported domain mapping detected in ",
-      std::get<0>(*self_mapping_info_)->toString(),
-      ". ",
-      std::get<3>(*self_mapping_info_),
-      " domains, ",
-      std::get<1>(*self_mapping_info_)->toString(),
-      " and ",
-      std::get<2>(*self_mapping_info_)->toString(),
-      ", are mapped with each other.");
-}
-
-namespace {
-
-// Returns the first pair of id's in ids detected to match eachother on the
-// permissive map of the ID graph. TODO: what this is really looking for is if
-// there's any overlapping between the iter domains in the provided set.
-//
-// i.e. if we have:
-// tv0 = arange(6).view({3, 2})
-// tv1 = tv0[3, 2].t()
-// tv2 = tv0[3, 2].view({2, 3})
-// tv3 = tv1 + tv2
-//
-// Then we can see this overlap in the tv3 expression as:
-//
-// tv0 = { {0, 1, 2},
-//         {3, 4, 5} }
-//
-// tv1 = { {0, 3},
-//         {1, 4},
-//         {2, 5} }
-//
-// tv2 = { {0, 1},
-//         {2, 3},
-//         {4, 5} }
-//
-// The elements in tv1 {3, 1, 4, 2}, map respectively to the elements in tv2
-// {1, 2, 3, 4}. The reason this is so important is it means that generating
-// tv3 is no longer a trivially parallelizable problem (if we include the dag
-// all the way to tv0). So tv0's axes cannot be inlined across both the tv0
-// and tv1 path. This breaks some assumptions we have today in schedulers that
-// will assume tv2 can be trivially inlined/parallelized. Instead we'd need to
-// take into consideration the effective communication going on here, so that
-// we pull multiple values of tv0 to compute tv3.
-c10::optional<std::pair<IterDomain*, IterDomain*>> detectMappablePair(
-    const std::vector<IterDomain*>& ids,
-    const IterDomainGraph& id_graph,
-    IdMappingMode mode) {
-  for (auto id1 : ids) {
-    for (auto id2 : ids) {
-      if (id1 == id2) {
-        continue;
-      }
-      if (id_graph.getDisjointIdSets(mode).permissiveAreMapped(id1, id2)) {
-        return std::make_pair(id1, id2);
-      }
-    }
-  }
-
-  return {};
-}
-
-// It is assumed that for any tensor represented by a list of domains,
-// those domains should never be mapped with each other. It may be
-// possible to lift this assumption, but it's unclear if it could
-// matter in practice.
-c10::optional<std::tuple<TensorView*, IterDomain*, IterDomain*, std::string>>
-findFirstSelfMapping(
-    const std::vector<TensorView*>& all_tvs,
-    const IterDomainGraph& id_graph) {
-  for (auto tv : all_tvs) {
-    // For each tensor, make sure root, rfactor and leaf domains
-    // should not include domains that are mapped with another domain
-    // in the same set of domains. This may be overly conservative,
-    // and it maybe enough to check the root domains.
-
-    // Root domains
-    auto self_mappped_root_pair =
-        detectMappablePair(tv->getRootDomain(), id_graph, IdMappingMode::EXACT);
-    if (self_mappped_root_pair.has_value()) {
-      return std::make_tuple(
-          tv,
-          self_mappped_root_pair->first,
-          self_mappped_root_pair->second,
-          "Root");
-    }
-
-    // Rfactor domains
-    if (tv->hasRFactor()) {
-      auto self_mappped_rf_pair = detectMappablePair(
-          tv->getRFactorDomain(), id_graph, IdMappingMode::EXACT);
-      if (self_mappped_rf_pair.has_value()) {
-        return std::make_tuple(
-            tv,
-            self_mappped_rf_pair->first,
-            self_mappped_rf_pair->second,
-            "RFactor");
-      }
-    }
-
-    // Leaf domains
-    auto self_mappped_leaf_pair = detectMappablePair(
-        tv->domain()->domain(), id_graph, IdMappingMode::LOOP);
-    if (self_mappped_leaf_pair.has_value()) {
-      return std::make_tuple(
-          tv,
-          self_mappped_leaf_pair->first,
-          self_mappped_leaf_pair->second,
-          "Leaf");
-    }
-  }
-  return c10::nullopt;
-}
-
-} // namespace
-
-// TODO: Should we avoid marking leaf Ids at this point?
-void IterDomainGraph::initializeId(IterDomain* id, bool is_view_rfactor_id) {
-  auto id_disjoint_set =
-      disjointIdsSet(IdMappingMode::EXACT).initializeSet(id).first->second;
-
-  auto def_it = id_definitions_.find(id);
-  if (def_it != id_definitions_.end()) {
-    auto defs = def_it->second;
-    ExprGroups expr_groups;
-    for (auto def : defs) {
-      auto expr_set = disjointExprsSet(IdMappingMode::EXACT)
-                          .initializeSet(def)
-                          .first->second;
-      expr_groups.pushBack(expr_set);
-    }
-    unique_definitions_[IdMappingMode::EXACT][id_disjoint_set] = expr_groups;
-  } else {
-    id_definitions_[id] = {};
-    unique_definitions_[IdMappingMode::EXACT][id_disjoint_set] = {};
-  }
-
-  auto use_it = id_uses_.find(id);
-  if (use_it != id_uses_.end()) {
-    auto uses = use_it->second;
-    ExprGroups expr_groups;
-    for (auto use : uses) {
-      auto expr_set = disjointExprsSet(IdMappingMode::EXACT)
-                          .initializeSet(use)
-                          .first->second;
-      expr_groups.pushBack(expr_set);
-    }
-    unique_uses_[IdMappingMode::EXACT][id_disjoint_set] = expr_groups;
-  } else {
-    id_uses_[id] = {};
-    unique_uses_[IdMappingMode::EXACT][id_disjoint_set] = {};
-  }
-
-  if (is_view_rfactor_id) {
-    view_rfactor_ids_.emplace(id);
-  }
-}
-
-std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
-IterDomainGraph::buildMapBetween(
-    const std::vector<IterDomain*>& from_ids,
-    const std::vector<IterDomain*>& to_ids,
-    IdMappingMode mode) const {
-  std::unordered_map<IterDomain*, IdGroup> from_ids2set;
-
-  for (auto from_id : from_ids) {
-    auto from_disjoint_set_pair = getDisjointIdSet(from_id, mode);
-    if (!from_disjoint_set_pair.second) {
-      continue;
-    }
-    from_ids2set[from_id] = from_disjoint_set_pair.first;
-  }
-
-  // Map from the sets associated with the IterDomains in to, to those iter
-  // domains
-  std::unordered_map<IdGroup, VectorOfUniqueEntries<IterDomain*>> set2to_ids;
-
-  for (auto to_id : to_ids) {
-    auto to_disjoint_set_pair = getDisjointIdSet(to_id, mode);
-    if (!to_disjoint_set_pair.second) {
-      continue;
-    }
-    auto to_set = to_disjoint_set_pair.first;
-    auto set2to_ids_it = set2to_ids.find(to_set);
-
-    if (set2to_ids_it == set2to_ids.end()) {
-      set2to_ids[to_set] = {to_id};
-    } else {
-      set2to_ids[to_set].pushBack(to_id);
-    }
-  }
-
-  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
-      from_ids2to_ids;
-  for (auto from_id : from_ids) {
-    from_ids2to_ids[from_id] = VectorOfUniqueEntries<IterDomain*>();
-
-    auto from_it = from_ids2set.find(from_id);
-    if (from_it == from_ids2set.end()) {
-      continue;
-    }
-
-    auto from_set = from_it->second;
-    auto to_entry_it = set2to_ids.find(from_set);
-    if (to_entry_it == set2to_ids.end()) {
-      continue;
-    }
-    from_ids2to_ids[from_id] = to_entry_it->second;
-  }
-  return from_ids2to_ids;
-}
-
-std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
-IterDomainGraph::buildMapBetween(
-    const VectorOfUniqueEntries<IterDomain*>& from_ids,
-    const VectorOfUniqueEntries<IterDomain*>& to_ids,
-    IdMappingMode mode) const {
-  return buildMapBetween(from_ids.vector(), to_ids.vector(), mode);
-}
-
-std::pair<ExprGroups, bool> IterDomainGraph::getIterDomainGroupDefinitions(
-    IdGroup id_group,
-    IdMappingMode mode) const {
-  auto null_return = std::make_pair(ExprGroups(), false);
-
-  if (id_group == nullptr) {
-    return null_return;
-  }
-
-  auto mode_it = unique_definitions_.find(mode);
-  if (mode_it == unique_definitions_.end()) {
-    return null_return;
-  }
-
-  auto definition_it = mode_it->second.find(id_group);
-  if (definition_it == mode_it->second.end()) {
-    return null_return;
-  }
-
-  return std::make_pair(definition_it->second, true);
-}
-
-std::pair<ExprGroups, bool> IterDomainGraph::getIterDomainGroupUses(
-    IdGroup id_group,
-    IdMappingMode mode) const {
-  auto null_return = std::make_pair(ExprGroups(), false);
-
-  if (id_group == nullptr) {
-    return null_return;
-  }
-
-  auto mode_it = unique_uses_.find(mode);
-  if (mode_it == unique_uses_.end()) {
-    return null_return;
-  }
-
-  auto uses_it = mode_it->second.find(id_group);
-  if (uses_it == mode_it->second.end()) {
-    return null_return;
-  }
-
-  return std::make_pair(uses_it->second, true);
-}
-
-void IterDomainGraph::buildIterDomainDefinitionsAndUses(
-    const std::vector<TensorView*>& all_tvs) {
-  for (auto tv : all_tvs) {
-    VectorOfUniqueEntries<IterDomain*> root_domain_ids{
-        tv->getRootDomain().begin(), tv->getRootDomain().end()};
-    auto all_ids = ir_utils::allIDsOf(tv);
-    for (auto id : all_ids) {
-      if (id_definitions_.find(id) == id_definitions_.end()) {
-        id_definitions_[id] = {};
-      }
-
-      if (id_uses_.find(id) == id_uses_.end()) {
-        id_uses_[id] = {};
-      }
-
-      auto def = id->definition();
-
-      if (def == nullptr || root_domain_ids.has(id)) {
-        continue;
-      }
-
-      if (id_definitions_.find(id) == id_definitions_.end()) {
-        id_definitions_[id] = {};
-      }
-      id_definitions_.at(id).pushBack(def);
-
-      auto inp_ids = ir_utils::filterByType<IterDomain>(def->inputs());
-      for (auto inp_id : inp_ids) {
-        if (id_uses_.find(inp_id) == id_uses_.end()) {
-          id_uses_[inp_id] = {};
-        }
-        id_uses_.at(inp_id).pushBack(def);
-      }
-    }
-  }
-}
-
-// TODO: Extend to include other information.
-std::string IterDomainGraph::toString() const {
-  std::stringstream ss;
-  ss << "IterDomainGraph { \n";
-  for (auto set : disjoint_ids_) {
-    ss << "Set " << set.first << ": " << std::endl;
-    ss << set.second.toString() << std::endl;
-  }
-  ss << " } IterDomainGraph\n" << std::endl;
-  return ss.str();
-}
-
-// Replay Expr but with the inputs provided. Input mapping will set a pairwise
-// mapping between new_inputs and expr->inputs()
-Expr* IterDomainGraph::addReplayAs(
-    const std::vector<IterDomain*>& new_inputs,
-    Expr* expr,
-    IdMappingMode input_mapping,
-    bool include_loop_map) {
-  std::vector<IdMappingMode> input_modes;
-  switch (input_mapping) {
-    case IdMappingMode::EXACT: {
-      input_modes.push_back(IdMappingMode::EXACT);
-      __attribute__((fallthrough));
-    }
-    case IdMappingMode::ALMOSTEXACT: {
-      input_modes.push_back(IdMappingMode::ALMOSTEXACT);
-      __attribute__((fallthrough));
-    }
-    case IdMappingMode::PERMISSIVE: {
-      input_modes.push_back(IdMappingMode::PERMISSIVE);
-      break;
-    }
-    case IdMappingMode::LOOP: {
-      TORCH_INTERNAL_ASSERT(
-          false, "Not implemented yet.");
-    }
-    default:
-      break;
-  }
-
-  auto orig_inputs = ir_utils::filterByType<IterDomain>(expr->inputs());
-  std::vector<IterDomain*> orig_input_ids(
-      orig_inputs.begin(), orig_inputs.end());
-  TORCH_INTERNAL_ASSERT(
-      new_inputs.size() == orig_input_ids.size(),
-      "Invalid number of inputs: ",
-      new_inputs.size(),
-      " does not match number of iter domain inputs for ",
-      expr->toString());
-  for (auto input_mode : input_modes) {
-    for (auto inp_i : c10::irange(orig_input_ids.size())) {
-      mapIds(orig_input_ids[inp_i], new_inputs[inp_i], input_mode);
-    }
-  }
-
-  auto replay = ReplayTransform::replayAs(new_inputs, expr);
-
-  for (auto inp_id : ir_utils::filterByType<IterDomain>(replay->inputs())) {
-    TORCH_INTERNAL_ASSERT(
-        id_uses_.find(inp_id) != id_uses_.end(),
-        "Missing use entry for: ",
-        inp_id->toString());
-    id_uses_.at(inp_id).pushBack(replay);
-  }
-
-  for (auto out_id : ir_utils::filterByType<IterDomain>(replay->outputs())) {
-    id_uses_[out_id] = {};
-    id_definitions_[out_id] = {replay};
-
-    initializeId(out_id, false);
-    // This should be run after IterDomain graph is built, initializeId
-    // doesn't initialize entries in the other maps.
-    disjointIdsSet(IdMappingMode::ALMOSTEXACT).initializeSet(out_id);
-    disjointIdsSet(IdMappingMode::PERMISSIVE).initializeSet(out_id);
-  }
-
-  // Propagate mappings from inputs
-  mapThroughExpr(expr, replay, true, IdMappingMode::PERMISSIVE);
-
-  ExprGroups all_exact_uses;
-  ExprGroups all_almost_exact_uses;
-  ExprGroups all_permissive_uses;
-  ExprGroups all_loop_uses;
-
-  for (auto inp : orig_input_ids) {
-    auto uses_pair = getIterDomainGroupUses(
-        getDisjointIdSet(inp, IdMappingMode::PERMISSIVE).first,
-        IdMappingMode::PERMISSIVE);
-    if (uses_pair.second) {
-      all_permissive_uses.pushBack(uses_pair.first);
-      for (auto permissive_expr_group : uses_pair.first) {
-        for (auto expr : *permissive_expr_group) {
-          all_exact_uses.pushBack(
-              getDisjointExprSet(expr, IdMappingMode::EXACT).first);
-          all_almost_exact_uses.pushBack(
-              getDisjointExprSet(expr, IdMappingMode::ALMOSTEXACT).first);
-          if (include_loop_map) {
-            all_almost_exact_uses.pushBack(
-                getDisjointExprSet(expr, IdMappingMode::LOOP).first);
-          }
-        }
-      }
-    }
-  }
-
-  for (auto exact_use : all_exact_uses) {
-    mapThroughExpr(exact_use->front(), replay, true, IdMappingMode::EXACT);
-  }
-
-  for (auto almost_exact_use : all_almost_exact_uses) {
-    mapThroughExpr(
-        almost_exact_use->front(), replay, true, IdMappingMode::ALMOSTEXACT);
-  }
-
-  for (auto permissive_use : all_permissive_uses) {
-    mapThroughExpr(
-        permissive_use->front(), replay, true, IdMappingMode::PERMISSIVE);
-  }
-
-  if (include_loop_map) {
-    for (auto loop_use : all_loop_uses) {
-      mapThroughExpr(loop_use->front(), replay, true, IdMappingMode::LOOP);
-    }
-  }
-
-  return replay;
-}
-
-// Checks if the expression is a trivial operation where an input is simply an
-// output of the transformation. Returns the mapped iter domains if found.
-std::vector<std::vector<IterDomain*>> IterDomainGraph::isTrivialExpr(
-    Expr* expr) {
-  std::vector<std::vector<IterDomain*>> mapped_ids;
-  if (auto merge = dynamic_cast<Merge*>(expr)) {
-    if (merge->inner()->extent()->isOneInt()) {
-      mapped_ids.push_back({merge->outer(), merge->out()});
-    }
-    if (merge->outer()->extent()->isOneInt()) {
-      mapped_ids.push_back({merge->inner(), merge->out()});
-    }
-  } else if (auto split = dynamic_cast<Split*>(expr)) {
-    if (split->factor()->isOneInt() && split->startOffset()->isZeroInt() &&
-        split->stopOffset()->isZeroInt()) {
-      if (split->innerSplit()) {
-        mapped_ids.push_back({split->in(), split->outer()});
-      } else {
-        mapped_ids.push_back({split->in(), split->inner()});
-      }
-    }
-  } else if (auto swizzle = dynamic_cast<Swizzle2D*>(expr)) {
-    if (swizzle->swizzleType() == Swizzle2DType::NoSwizzle ||
-        swizzle->swizzleMode() == SwizzleMode::NoSwizzle) {
-      mapped_ids.push_back({swizzle->inX(), swizzle->outX()});
-      mapped_ids.push_back({swizzle->inY(), swizzle->outY()});
-    }
-  }
-  return mapped_ids;
-}
-
-void IterDomainGraph::initialIdProcessing(
-    const std::vector<TensorView*>& all_tvs) {
-  // Initialize entries for every iteration domain and mark view like
-  // iteration domains and leaf iteration domains.
-  for (auto tv : all_tvs) {
-    auto all_ids = ir_utils::allIDsOf(tv);
-
-    // Check is this domain is a consumer of a view-like operation
-    bool view_like_domain = tv->domain()->hasViewLikeRFactor();
-
-    for (auto id : all_ids) {
-      // Check if this id is a view like rfactor id
-      bool is_view_rfactor_id = false;
-      if (view_like_domain && id->isRFactorProduct()) {
-        // If the tensor domain is a view like domain, and the iteration
-        // domain is marked as an rfactor product and is in the rfactor
-        // domain, it's a view like rfactor iteration domain
-        const auto& rfactor_domain = tv->domain()->getMaybeRFactorDomain();
-        if (std::find(rfactor_domain.begin(), rfactor_domain.end(), id) !=
-            rfactor_domain.end()) {
-          is_view_rfactor_id = true;
-        }
-      }
-      initializeId(id, is_view_rfactor_id);
-    }
-  }
-}
-
-void IterDomainGraph::mapThroughLoopSwizzles(IdMappingMode mode) {
-  // TODO: Move to unique_uses_
-  for (auto use_it : id_uses_) {
-    auto uses = use_it.second;
-    for (auto use : uses) {
-      if (auto swizzle_2d = dynamic_cast<Swizzle2D*>(use)) {
-        // Map each input to its corresponding output on the given
-        // disjoint set if this is a loop swizzle. Loop swizzles don't impact
-        // indexing, only iteration order.
-        if (swizzle_2d->swizzleMode() == SwizzleMode::Loop) {
-          mapIds(swizzle_2d->inX(), swizzle_2d->outX(), mode);
-          mapIds(swizzle_2d->inY(), swizzle_2d->outY(), mode);
-        }
-      }
-    }
-  }
-}
-
-void IterDomainGraph::buildExactMap(const std::vector<Expr*>& exprs) {
   for (auto expr : exprs) {
-    TensorView* c_tv = ir_utils::getTvOutput(expr);
-
-    auto all_tv_outputs = ir_utils::filterByType<TensorView>(expr->outputs());
-
-    // Map siblings, as all other tv output domains must match the first tv
-    // outputs domain.
-    std::deque<TensorView*> other_tv_outputs(
-        all_tv_outputs.begin(), all_tv_outputs.end());
-    other_tv_outputs.pop_front();
-
-    for (auto other_tv_output : other_tv_outputs) {
-      // Sibling tv's must be exactly mapped with eachother so simply zip
-      // their leaf iter domains.
-
-      TORCH_INTERNAL_ASSERT(
-          other_tv_output->getRootDomain().size() ==
-              c_tv->getRootDomain().size(),
-          "Multiple outputs with mismatched TV domains is not supported.");
-
-      for (auto domain_i : c10::irange(c_tv->getRootDomain().size())) {
-        auto c_id = c_tv->getRootDomain()[domain_i];
-        auto o_id = other_tv_output->getRootDomain()[domain_i];
-        mapIds(o_id, c_id, IdMappingMode::EXACT);
-      }
-    }
-
-    // Map producer-consumer relationships based on the root domain map
-    auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
-    for (auto p_tv : tv_inputs) {
-      // For exact mapings do not map any broadcast dimensions to
-      // non-broadcast dimensions. Prevent any broadcasted axes being mapped
-      // to non-broadcasted axes.
-      auto exact_c2p_root_map =
-          PairwiseRootDomainMap(p_tv, c_tv, true)
-              .mapConsumerToProducer(c_tv->domain(), p_tv->domain());
-
-      for (auto c_id : getSortedKeys(exact_c2p_root_map, Statement::lessThan)) {
-        auto p_id = exact_c2p_root_map.at(c_id);
-        mapIds(c_id, p_id, IdMappingMode::EXACT);
-      }
-    }
-
-    mapThroughLoopSwizzles(IdMappingMode::EXACT);
-  }
-}
-
-void IterDomainGraph::buildPermissiveMap(const std::vector<Expr*>& exprs) {
-  copyGraph(IdMappingMode::EXACT, IdMappingMode::PERMISSIVE);
-
-  for (auto expr : exprs) {
-    // Multiple outputs are already mapped, we can ignore all but the first
-    // consumer given they have to be replayed in the same exact way
-    // Multiple outputs are already mapped, we can ignore all but the first
-    // consumer given they have to be replayed in the same exact way
-    TensorView* c_tv = ir_utils::getTvOutput(expr);
-
-    auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
-
-    for (auto p_tv : tv_inputs) {
-      auto p_ids_vec = ir_utils::allIDsOf(p_tv);
-      auto c_ids_vec = ir_utils::allIDsOf(c_tv);
-      std::unordered_set<IterDomain*> p_ids(p_ids_vec.begin(), p_ids_vec.end());
-      std::unordered_set<IterDomain*> c_ids(c_ids_vec.begin(), c_ids_vec.end());
-
-      ForwardingInfo permissive_forwarding(p_tv, c_tv);
-      for (auto entry : permissive_forwarding.producer_forwarding_map) {
-        mapIds(entry.first, entry.second, IdMappingMode::PERMISSIVE);
-      }
-      
-      // TODO: Should this just get rolled up in the forwarding map now?
-      for (auto entry : permissive_forwarding.producer_compliment_map) {
-        for (auto entry_2 : entry.second) {
-          mapIds(entry.first, entry_2, IdMappingMode::PERMISSIVE);
-        }
-      }
-      
-      for (auto entry : permissive_forwarding.consumer_forwarding_map) {
-        mapIds(entry.first, entry.second, IdMappingMode::PERMISSIVE);
-      }
-
-      // TODO: Should this just get rolled up in the forwarding map now?
-      for (auto entry : permissive_forwarding.consumer_compliment_map) {
-        for (auto entry_2 : entry.second) {
-          mapIds(entry.first, entry_2, IdMappingMode::PERMISSIVE);
-        }
-      }
-
-      auto permissive_c2p_root_map = PairwiseRootDomainMap(p_tv, c_tv);
-
-      for (auto entry : permissive_c2p_root_map.mapConsumerToProducer(
-               c_tv->domain(), p_tv->domain())) {
-        mapIds(entry.first, entry.second, IdMappingMode::PERMISSIVE);
-      }
-    }
-  }
-  mapThroughLoopSwizzles(IdMappingMode::PERMISSIVE);
-}
-
-void IterDomainGraph::buildAlmostExactMap() {
-  // Build almost exact map by forwarding through broadcast axes
-  copyGraph(IdMappingMode::EXACT, IdMappingMode::ALMOSTEXACT);
-
-  VectorOfUniqueEntries<Expr*> exprs;
-  for (auto expr :
-       getDisjointExprSets(IdMappingMode::ALMOSTEXACT).disjointSets()) {
-    exprs.pushBack(expr->front());
-  }
-  ExprGroups trivial_expr_groups;
-
-  // Map through trivial expressions
-  for (auto expr : exprs) {
-    auto mapped_ids = isTrivialExpr(expr);
-    for (auto mapped_id_group : mapped_ids) {
-      for (auto id : mapped_id_group) {
-        trivial_expr_groups.pushBack(
-            getDisjointExprSet(expr, IdMappingMode::ALMOSTEXACT).first);
-        mapIds(mapped_id_group.front(), id, IdMappingMode::ALMOSTEXACT);
-      }
-    }
-  }
-
-  // TODO: Clear out expressions that map inputs and outputs to the same group
-  // from definitions and uses. They shouldn't be important in traversal.
-  // Similar to what's drafted in buildIndexMap
-}
-
-void IterDomainGraph::validateAndPropagatePType() const {
-  for (const auto& loop_disjoint_set :
-       getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
-    ParallelType common_ptype = ParallelType::Serial;
-    for (auto id : loop_disjoint_set->vector()) {
-      auto id_ptype = id->getParallelType();
-      TORCH_INTERNAL_ASSERT(
-          id_ptype == common_ptype || id_ptype == ParallelType::Serial ||
-              common_ptype == ParallelType::Serial,
-          "Issue validating parallel type disjoint ptype is, ",
-          common_ptype,
-          " but found in the set the id: ",
-          id->toString());
-      common_ptype =
-          common_ptype == ParallelType::Serial ? id_ptype : common_ptype;
-    }
-
-    for (auto id : loop_disjoint_set->vector()) {
-      id->parallelize(common_ptype);
-    }
-  }
-}
-
-void IterDomainGraph::build(
-    const std::vector<Expr*>& exprs,
-    const std::vector<TensorView*>& additional_tvs) {
-  // Initialize the required sets as if a permissive relationship is never
-  // found, then querying an empty permissive map will fail later.
-  std::vector<IdMappingMode> mapping_types{
-      IdMappingMode::EXACT,
-      IdMappingMode::ALMOSTEXACT,
-      IdMappingMode::PERMISSIVE,
-      IdMappingMode::LOOP,
-      IdMappingMode::INDEX};
-
-  // Initialize disjoint sets
-  for (auto mode : mapping_types) {
-    disjoint_ids_[mode] = DisjointSets<IterDomain*>();
-    disjoint_exprs_[mode] = DisjointSets<Expr*>();
-  }
-
-  std::vector<Expr*> tv_exprs;
-
-  std::copy_if(
-      exprs.begin(), exprs.end(), std::back_inserter(tv_exprs), [](Expr* expr) {
-        TORCH_INTERNAL_ASSERT(expr != nullptr);
-        return ir_utils::isTvOp(expr);
-      });
-
-  auto all_tvs = ir_utils::allTvsOfExprs(tv_exprs);
-  if (additional_tvs.size() > 0) {
-    std::unordered_set<TensorView*> all_added_tvs(
-        all_tvs.begin(), all_tvs.end());
-    for (auto additional_tv : additional_tvs) {
-      if (all_added_tvs.find(additional_tv) == all_added_tvs.end()) {
-        all_tvs.push_back(additional_tv);
-      }
-    }
-  }
-
-  if (all_tvs.empty()) {
-    return;
-  }
-
-  FusionGuard fg(all_tvs.front()->fusion());
-
-  // Add uses and definitions to all iter domains.
-
-  buildIterDomainDefinitionsAndUses(all_tvs);
-  // Initialize the maps with all the IterDomains used in the provded
-  // expressions.
-  initialIdProcessing(all_tvs);
-
-  buildExactMap(tv_exprs);
-
-  buildAlmostExactMap();
-
-  buildPermissiveMap(tv_exprs);
-  // Only build loop map during lowering
-  if (FusionGuard::getCurFusion()->isA<kir::Kernel>()) {
-    // Find loops that need to be promoted because of broadcast resolution,
-    // figure out what that resolution should look like, compute IDs for it if
-    // necessary.
-    buildLoopPromotionMap(tv_exprs);
-
-    TORCH_INTERNAL_ASSERT(false);
-
-    validateAndPropagatePType();
-
-    // buildIndexMap(all_tvs);
-
-    // std::cout << "Index id_groups:" << std::endl;
-    // for (auto id_group :
-    //      getDisjointIdSets(IdMappingMode::INDEX).disjointSets()) {
-    //   std::cout << debug_print::idGroupStringShort(id_group) << std::endl;
-    // }
-    // std::cout << "Index expr_groups:" << std::endl;
-    // for (auto expr_group :
-    //      getDisjointExprSets(IdMappingMode::INDEX).disjointSets()) {
-    //   std::cout << debug_print::exprGroupStringShort(
-    //                    *this, expr_group, IdMappingMode::INDEX)
-    //             << std::endl;
-    // }
-  }
-
-  // Debug, make sure there's no self mapping in TensorView's during lowering
-  // that would invalidate lowering assumptions.
-  self_mapping_info_ = findFirstSelfMapping(all_tvs, *this);
-}
-
-void IterDomainGraph::copyGraph(
-    IdMappingMode from_mode,
-    IdMappingMode to_mode) {
-  if (from_mode == to_mode) {
-    return;
-  }
-
-  disjointIdsSet(to_mode) = disjointIdsSet(from_mode);
-  disjointExprsSet(to_mode) = disjointExprsSet(from_mode);
-
-  unique_definitions_[to_mode] = {};
-  unique_uses_[to_mode] = {};
-
-  for (auto is_defs : std::vector<bool>({true, false})) {
-    if (is_defs) {
-      if (unique_definitions_.find(from_mode) == unique_definitions_.end()) {
-        continue;
-      }
-    } else {
-      if (unique_uses_.find(from_mode) == unique_uses_.end()) {
-        continue;
-      }
-    }
-    auto& from_defs_or_uses =
-        is_defs ? unique_definitions_[from_mode] : unique_uses_[from_mode];
-
-    auto& to_defs_or_uses =
-        is_defs ? unique_definitions_[to_mode] : unique_uses_[to_mode];
-
-    for (auto entry : from_defs_or_uses) {
-      // Mappings from IterDomain to a vector of disjoint expression sets
-      auto orig_id = entry.first->front();
-      auto orig_expr_sets = entry.second;
-
-      auto new_new_id_group =
-          disjointIdsSet(to_mode).disjointSetMap().at(orig_id);
-
-      ExprGroups new_exprs;
-
-      for (auto orig_expr_set : orig_expr_sets.vector()) {
-        auto orig_expr = orig_expr_set->front();
-        auto new_expr_set =
-            disjointExprsSet(to_mode).disjointSetMap().at(orig_expr);
-        new_exprs.pushBack(new_expr_set);
-      }
-
-      if (new_exprs.size() > 0) {
-        to_defs_or_uses[new_new_id_group] = new_exprs;
-      }
-    }
-  }
-}
-
-namespace {
-
-// Returns the root producer iteration domains that are resolved by provided
-// consumer
-std::unordered_map<IterDomain*, IterDomain*> resolvedRootBroadcasts(
-    TensorView* producer,
-    TensorView* consumer) {
-  auto p2c_map =
-      PairwiseRootDomainMap(producer, consumer)
-          .mapProducerToConsumer(producer->domain(), consumer->domain());
-
-  std::unordered_map<IterDomain*, IterDomain*> resolved_bcast_map;
-  for (const auto& kv : p2c_map) {
-    auto p_id = kv.first;
-    // Ignore non-broadcast dims
-    if (!p_id->isBroadcast()) {
-      continue;
-    }
-    auto c_id = kv.second;
-    // If the consumer ID is a reduction (i.e., a trivial
-    // reduction), do not consider it's concretized.
-    if (c_id->isBroadcast() || c_id->isReduction()) {
-      continue;
-    }
-    resolved_bcast_map[p_id] = c_id;
-  }
-  return resolved_bcast_map;
-}
-
-} // namespace
-
-ExprGroups IterDomainGraph::toGroups(
-    const VectorOfUniqueEntries<Expr*>& exprs,
-    IdMappingMode mode) const {
-  ExprGroups groups;
-  for (auto expr : exprs) {
-    auto disjoint_set_pair = getDisjointExprSet(expr, mode);
+    auto disjoint_set_pair = disjointExprSet(expr);
     if (disjoint_set_pair.second) {
-      groups.pushBack(disjoint_set_pair.first);
+      expr_groups.pushBack(disjoint_set_pair.first);
     }
   }
-  return groups;
+  return expr_groups;
 }
 
-IdGroups IterDomainGraph::toGroups(
-    const VectorOfUniqueEntries<IterDomain*>& ids,
-    IdMappingMode mode) const {
-  IdGroups groups;
+IdGroups IdGraph::toGroups(
+    const VectorOfUniqueEntries<IterDomain*>& ids) const {
+  IdGroups id_groups;
   for (auto id : ids) {
-    auto disjoint_set_pair = getDisjointIdSet(id, mode);
+    auto disjoint_set_pair = disjointIdSet(id);
     if (disjoint_set_pair.second) {
-      groups.pushBack(disjoint_set_pair.first);
+      id_groups.pushBack(disjoint_set_pair.first);
     }
   }
-  return groups;
+  return id_groups;
 }
 
-IdGroups IterDomainGraph::outputGroups(ExprGroup expr, IdMappingMode mode)
-    const {
+IdGroups IdGraph::outputGroups(ExprGroup expr) const {
   VectorOfUniqueEntries<IterDomain*> id_outputs;
   for (auto id_output :
        ir_utils::filterByType<IterDomain>(expr->front()->outputs())) {
     id_outputs.pushBack(id_output);
   }
-
-  return toGroups(id_outputs, mode);
+  return toGroups(id_outputs);
 }
 
-IdGroups IterDomainGraph::inputGroups(ExprGroup expr, IdMappingMode mode)
-    const {
+IdGroups IdGraph::inputGroups(ExprGroup expr) const {
   VectorOfUniqueEntries<IterDomain*> id_inputs;
   for (auto id_input :
        ir_utils::filterByType<IterDomain>(expr->front()->inputs())) {
     id_inputs.pushBack(id_input);
   }
-  return toGroups(id_inputs, mode);
+  return toGroups(id_inputs);
 }
 
-ExprGroups IterDomainGraph::allUsesOf(const IdGroups& of, IdMappingMode mode)
-    const {
+ExprGroups IdGraph::allUsesOf(const IdGroups& of) const {
   ExprGroups to_visit;
   for (auto of_id_group : of) {
-    auto group_uses_pair = getIterDomainGroupUses(of_id_group, mode);
+    auto group_uses_pair = iterDomainGroupUses(of_id_group);
     if (group_uses_pair.second) {
       to_visit.pushBack(group_uses_pair.first);
     }
@@ -1469,9 +301,9 @@ ExprGroups IterDomainGraph::allUsesOf(const IdGroups& of, IdMappingMode mode)
   while (to_visit.size() > 0) {
     auto current_expr = to_visit.popFront();
     visited.pushBack(current_expr);
-    auto output_ids = outputGroups(current_expr, mode);
+    auto output_ids = outputGroups(current_expr);
     for (auto output_id : output_ids) {
-      auto group_uses_pair = getIterDomainGroupUses(output_id, mode);
+      auto group_uses_pair = iterDomainGroupUses(output_id);
       if (!group_uses_pair.second) {
         continue;
       }
@@ -1487,12 +319,10 @@ ExprGroups IterDomainGraph::allUsesOf(const IdGroups& of, IdMappingMode mode)
   return visited;
 }
 
-ExprGroups IterDomainGraph::allDefinitionsOf(
-    const IdGroups& of,
-    IdMappingMode mode) const {
+ExprGroups IdGraph::allDefinitionsOf(const IdGroups& of) const {
   ExprGroups to_visit;
   for (auto of_id_group : of) {
-    auto group_defs_pair = getIterDomainGroupDefinitions(of_id_group, mode);
+    auto group_defs_pair = iterDomainGroupDefinitions(of_id_group);
     if (group_defs_pair.second) {
       to_visit.pushBack(group_defs_pair.first);
     }
@@ -1502,9 +332,9 @@ ExprGroups IterDomainGraph::allDefinitionsOf(
   while (to_visit.size() > 0) {
     auto current_expr = to_visit.popFront();
     visited.pushBack(current_expr);
-    auto input_ids = inputGroups(current_expr, mode);
+    auto input_ids = inputGroups(current_expr);
     for (auto input_id : input_ids) {
-      auto group_defs_pair = getIterDomainGroupDefinitions(input_id, mode);
+      auto group_defs_pair = iterDomainGroupDefinitions(input_id);
       if (!group_defs_pair.second) {
         continue;
       }
@@ -1520,21 +350,17 @@ ExprGroups IterDomainGraph::allDefinitionsOf(
   return visited;
 }
 
-// TODO: This seems really heavy weight, would be good to explore if there's
-// better options here. It's called quite a bit in buildLoopPromotionMap
-ExprGroups IterDomainGraph::getExprsBetween(
-    const IdGroups& from,
-    const IdGroups& to,
-    IdMappingMode mode) const {
-  auto all_uses_of_from = allUsesOf(from, mode);
-  auto all_definitions_of_to = allDefinitionsOf(to, mode);
+ExprGroups IdGraph::getExprsBetween(const IdGroups& from, const IdGroups& to)
+    const {
+  auto all_uses_of_from = allUsesOf(from);
+  auto all_definitions_of_to = allDefinitionsOf(to);
 
   // All of the expressions between from and to. Not all will be used as we
   // just want to define each iter domain group once.
   auto all_exprs = all_uses_of_from.intersect(all_definitions_of_to);
 
   // There could be IterDomains in from or to that are between other from and
-  // to nodes. We should make sure to clear those out.
+  // to nodes. Make sure to clear those out.
   IdGroups terminating_inputs;
   IdGroups terminating_outputs;
   {
@@ -1543,21 +369,24 @@ ExprGroups IterDomainGraph::getExprsBetween(
     IdGroups all_id_groups;
 
     for (auto expr_group : all_exprs) {
-      auto inp_groups = inputGroups(expr_group, mode);
-      auto out_groups = outputGroups(expr_group, mode);
+      auto inp_groups = inputGroups(expr_group);
+      auto out_groups = outputGroups(expr_group);
       if (inp_groups.intersect(out_groups).size() > 0) {
         // Expression is just a loop to its current group, ignore
         continue;
       }
+
+      all_id_groups.pushBack(inp_groups);
+
       if (inp_groups.empty()) {
         not_outputs.pushBack(inp_groups);
       }
-      all_id_groups.pushBack(inp_groups);
+
+      all_id_groups.pushBack(out_groups);
 
       if (out_groups.empty()) {
         not_inputs.pushBack(out_groups);
       }
-      all_id_groups.pushBack(out_groups);
     }
     terminating_inputs = all_id_groups.subtract(not_inputs);
     terminating_outputs = all_id_groups.subtract(not_outputs);
@@ -1574,7 +403,7 @@ ExprGroups IterDomainGraph::getExprsBetween(
   // Return if all output IterDomain groups of an expression group have
   // already been visited
   auto outputsVisited = [&](ExprGroup expr) {
-    for (auto id_group : outputGroups(expr, mode)) {
+    for (auto id_group : outputGroups(expr)) {
       if (required_ind_exprs_ids.find(id_group) ==
           required_ind_exprs_ids.end()) {
         return false;
@@ -1584,7 +413,7 @@ ExprGroups IterDomainGraph::getExprsBetween(
   };
 
   auto allIdUsesVisisted = [&](IdGroup id) {
-    auto uses_pair = getIterDomainGroupUses(id, mode);
+    auto uses_pair = iterDomainGroupUses(id);
     if (!uses_pair.second) {
       return true;
     }
@@ -1602,7 +431,7 @@ ExprGroups IterDomainGraph::getExprsBetween(
   // Returns all expression groups in required_ind_exprs_ids of outputs
   auto requiredExprsOutputs = [&](ExprGroup expr) {
     ExprGroups all_output_required_exprs;
-    for (auto id_group : outputGroups(expr, mode)) {
+    for (auto id_group : outputGroups(expr)) {
       auto id_group_exprs_it = required_ind_exprs_ids.find(id_group);
       TORCH_INTERNAL_ASSERT(
           id_group_exprs_it != required_ind_exprs_ids.end(),
@@ -1630,7 +459,7 @@ ExprGroups IterDomainGraph::getExprsBetween(
     // domain coming back from any of its uses.
     ExprGroups min_groups;
 
-    auto uses_pair = getIterDomainGroupUses(id, mode);
+    auto uses_pair = iterDomainGroupUses(id);
     if (!uses_pair.second) {
       // No expressions required for this iter domain, it must be a
       // terminating output.
@@ -1683,7 +512,7 @@ ExprGroups IterDomainGraph::getExprsBetween(
       }
       if (processExpr(currently_visiting)) {
         something_was_processed = true;
-        auto inp_groups = inputGroups(currently_visiting, mode);
+        auto inp_groups = inputGroups(currently_visiting);
         for (auto inp_group : inp_groups) {
           to_visit_ids.pushBack(inp_group);
         }
@@ -1704,11 +533,11 @@ ExprGroups IterDomainGraph::getExprsBetween(
 
       if (processId(currently_visiting)) {
         something_was_processed = true;
-        auto definitions_pair =
-            getIterDomainGroupDefinitions(currently_visiting, mode);
+        auto definitions_pair = iterDomainGroupDefinitions(currently_visiting);
         if (definitions_pair.second) {
           for (auto def : definitions_pair.first) {
             if (!all_exprs.has(def)) {
+              continue;
             }
             if (required_ind_exprs_exprs.find(def) ==
                 required_ind_exprs_exprs.end()) {
@@ -1733,7 +562,7 @@ ExprGroups IterDomainGraph::getExprsBetween(
   for (auto entry : required_ind_exprs_ids) {
     auto id = entry.first;
     auto traverse_exprs = entry.second;
-    auto all_uses = getIterDomainGroupUses(id, mode);
+    auto all_uses = iterDomainGroupUses(id);
     if (all_uses.second) {
       uses_path[id] = traverse_exprs.intersect(all_uses.first);
     } else {
@@ -1750,8 +579,9 @@ ExprGroups IterDomainGraph::getExprsBetween(
     auto use_it = uses_path.find(inp);
     TORCH_INTERNAL_ASSERT(
         use_it != uses_path.end(),
-        "Invalid calculation of exprs between, no use found of terminating input: ",
-        inp->toString());
+        "Invalid calculation of exprs between, no use found of a provided terminating input: ",
+        inp->toString(),
+        " expressions cannot be computed.");
     auto uses = use_it->second;
     for (auto use : uses) {
       to_visit.pushBack(use);
@@ -1765,16 +595,16 @@ ExprGroups IterDomainGraph::getExprsBetween(
     ExprGroups still_to_visit;
     while (to_visit.size() > 0) {
       auto currently_visiting = to_visit.popFront();
-      auto inputs = inputGroups(currently_visiting, mode);
+      auto inputs = inputGroups(currently_visiting);
       if (std::all_of(inputs.begin(), inputs.end(), [&](IdGroup inp_id) {
             return visited.has(inp_id);
           })) {
         something_processed = true;
         sorted_exprs.pushBack(currently_visiting);
-        auto outputs = outputGroups(currently_visiting, mode);
+        auto outputs = outputGroups(currently_visiting);
         for (auto out_id : outputs) {
           visited.pushBack(out_id);
-          auto use_pair = getIterDomainGroupUses(out_id, mode);
+          auto use_pair = iterDomainGroupUses(out_id);
           if (!use_pair.second) {
             continue;
           }
@@ -1791,19 +621,1099 @@ ExprGroups IterDomainGraph::getExprsBetween(
   return sorted_exprs;
 }
 
-std::unordered_map<IdGroup, IdGroups> IterDomainGraph::
-    buildCoveredAlmostExact() {
+std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>> IdGraph::
+    buildMapBetween(
+        const std::vector<IterDomain*>& from,
+        const std::vector<IterDomain*>& to) const {
+  std::unordered_map<IterDomain*, IdGroup> from_ids2set;
 
+  for (auto from_id : from) {
+    auto from_disjoint_set_pair = disjointIdSet(from_id);
+    if (!from_disjoint_set_pair.second) {
+      continue;
+    }
+    from_ids2set[from_id] = from_disjoint_set_pair.first;
+  }
+
+  // Map from the sets associated with the IterDomains in to, to those iter
+  // domains
+  std::unordered_map<IdGroup, VectorOfUniqueEntries<IterDomain*>> set2to_ids;
+
+  for (auto to_id : to) {
+    auto to_disjoint_set_pair = disjointIdSet(to_id);
+    if (!to_disjoint_set_pair.second) {
+      continue;
+    }
+    auto to_set = to_disjoint_set_pair.first;
+    auto set2to_ids_it = set2to_ids.find(to_set);
+
+    if (set2to_ids_it == set2to_ids.end()) {
+      set2to_ids[to_set] = {to_id};
+    } else {
+      set2to_ids[to_set].pushBack(to_id);
+    }
+  }
+
+  std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>>
+      from_ids2to_ids;
+  for (auto from_id : from) {
+    from_ids2to_ids[from_id] = VectorOfUniqueEntries<IterDomain*>();
+
+    auto from_it = from_ids2set.find(from_id);
+    TORCH_INTERNAL_ASSERT(from_it != from_ids2set.end());
+
+    auto from_set = from_it->second;
+    auto to_entry_it = set2to_ids.find(from_set);
+    if (to_entry_it == set2to_ids.end()) {
+      continue;
+    }
+    from_ids2to_ids[from_id] = to_entry_it->second;
+  }
+  return from_ids2to_ids;
+}
+
+std::unordered_map<IterDomain*, VectorOfUniqueEntries<IterDomain*>> IdGraph::
+    buildMapBetween(
+        const VectorOfUniqueEntries<IterDomain*>& from,
+        const VectorOfUniqueEntries<IterDomain*>& to) const {
+  return buildMapBetween(from.vector(), to.vector());
+}
+
+std::pair<ExprGroups, bool> IdGraph::iterDomainGroupDefinitions(
+    IdGroup id_group) const {
+  auto null_return = std::make_pair(ExprGroups(), false);
+
+  if (id_group == nullptr) {
+    return null_return;
+  }
+
+  auto definitions_it = unique_definitions_.find(id_group);
+  if (definitions_it == unique_definitions_.end()) {
+    return null_return;
+  }
+
+  return std::make_pair(definitions_it->second, true);
+}
+
+std::pair<ExprGroups, bool> IdGraph::iterDomainGroupUses(
+    IdGroup id_group) const {
+  auto null_return = std::make_pair(ExprGroups(), false);
+
+  if (id_group == nullptr) {
+    return null_return;
+  }
+
+  auto uses_it = unique_uses_.find(id_group);
+  if (uses_it == unique_uses_.end()) {
+    return null_return;
+  }
+
+  return std::make_pair(uses_it->second, true);
+}
+
+// TODO: Improve and extend to include other information.
+std::string IdGraph::toString() const {
+  std::stringstream ss;
+  ss << "IdGraph { \n";
+  ss << "Disjoint Id Set " << disjoint_ids_.toString() << std::endl;
+  ss << " } IdGraph\n" << std::endl;
+  return ss.str();
+}
+
+std::vector<std::vector<IterDomain*>> IdGraph::isTrivialExpr(Expr* expr) {
+  std::vector<std::vector<IterDomain*>> mapped_ids;
+  if (auto merge = dynamic_cast<Merge*>(expr)) {
+    if (merge->inner()->extent()->isOneInt()) {
+      mapped_ids.push_back({merge->outer(), merge->out()});
+    }
+    if (merge->outer()->extent()->isOneInt()) {
+      mapped_ids.push_back({merge->inner(), merge->out()});
+    }
+  } else if (auto split = dynamic_cast<Split*>(expr)) {
+    if (split->factor()->isOneInt() && split->startOffset()->isZeroInt() &&
+        split->stopOffset()->isZeroInt()) {
+      if (split->innerSplit()) {
+        mapped_ids.push_back({split->in(), split->outer()});
+      } else {
+        mapped_ids.push_back({split->in(), split->inner()});
+      }
+    }
+  } else if (auto swizzle = dynamic_cast<Swizzle2D*>(expr)) {
+    if (swizzle->swizzleType() == Swizzle2DType::NoSwizzle ||
+        swizzle->swizzleMode() == SwizzleMode::NoSwizzle) {
+      mapped_ids.push_back({swizzle->inX(), swizzle->outX()});
+      mapped_ids.push_back({swizzle->inY(), swizzle->outY()});
+    }
+  }
+  return mapped_ids;
+}
+
+// TODO: Add explicit id_definitions_ and id_uses_
+void IdGraph::initializeId(
+    IterDomain* id,
+    const VectorOfUniqueEntries<Expr*>& definitions,
+    const VectorOfUniqueEntries<Expr*>& uses) {
+  auto id_disjoint_set = disjointIdSets().initializeSet(id).first->second;
+
+  ExprGroups def_groups;
+  for (auto def : definitions) {
+    auto expr_set = disjointExprSets().initializeSet(def).first->second;
+    def_groups.pushBack(expr_set);
+  }
+  unique_definitions_[id_disjoint_set] = def_groups;
+
+  ExprGroups use_groups;
+  for (auto use : uses) {
+    auto expr_set = disjointExprSets().initializeSet(use).first->second;
+    use_groups.pushBack(expr_set);
+  }
+  unique_uses_[id_disjoint_set] = use_groups;
+}
+
+bool IdGraph::exprsMap(Expr* first, Expr* second, bool forward) const {
+  if (first == nullptr || second == nullptr) {
+    return false;
+  }
+
+  if (typeid(*first) != typeid(*second)) {
+    return false;
+  }
+
+  TORCH_INTERNAL_ASSERT(
+      first->isA<Merge>() || first->isA<Split>() || first->isA<Swizzle2D>(),
+      "Merge and split are the only expressions supported through rfactor operations in compute at map, but found:\n",
+      first->toString());
+
+  auto first_ids = ir_utils::filterByType<IterDomain>(
+                       forward ? first->inputs() : first->outputs())
+                       .vector();
+
+  auto second_ids = ir_utils::filterByType<IterDomain>(
+                        forward ? second->inputs() : second->outputs())
+                        .vector();
+
+  TORCH_INTERNAL_ASSERT(
+      first_ids.size() == second_ids.size(),
+      "Expected number of ",
+      (forward ? "inputs" : "outputs"),
+      " to match for\n",
+      first->toString(),
+      second->toString());
+
+  {
+    std::vector<std::pair<IterDomain*, IterDomain*>> zipped_ids;
+
+    std::transform(
+        first_ids.begin(),
+        first_ids.end(),
+        second_ids.begin(),
+        std::back_inserter(zipped_ids),
+        [](IterDomain* first, IterDomain* second) {
+          return std::make_pair(first, second);
+        });
+
+    if (std::any_of(
+            zipped_ids.begin(),
+            zipped_ids.end(),
+            [&](std::pair<IterDomain*, IterDomain*> id_pair) {
+              return !disjointIdSets().permissiveAreMapped(
+                  id_pair.first, id_pair.second);
+            })) {
+      return false;
+    }
+  }
+
+  if (first->isA<Merge>() && !forward) {
+    // Can't back prop through merge without making sure one input actually
+    // matches. This can be done on a map or extent basis.
+    auto merge0 = first->as<Merge>();
+    auto merge1 = second->as<Merge>();
+
+    auto extent_0o = merge0->outer()->extent();
+    auto extent_0i = merge0->inner()->extent();
+    auto extent_1o = merge1->outer()->extent();
+    auto extent_1i = merge1->inner()->extent();
+
+    auto extent_0_match = extent_0o->sameAs(extent_1o) ||
+        (extent_0o->isConstInt() && extent_1o->isConstInt() &&
+         extent_0o->evaluateInt() == extent_1o->evaluateInt()) ||
+        disjointIdSets().permissiveAreMapped(merge0->outer(), merge1->outer());
+
+    auto extent_1_match = extent_0i->sameAs(extent_1i) ||
+        (extent_0i->isConstInt() && extent_1i->isConstInt() &&
+         extent_0i->evaluateInt() == extent_1i->evaluateInt()) ||
+        disjointIdSets().permissiveAreMapped(merge0->inner(), merge1->inner());
+
+    if (!(extent_0_match || extent_1_match)) {
+      return false;
+    }
+  }
+
+  if (first->isA<Split>()) {
+    auto first_split = first->as<Split>();
+    auto second_split = second->as<Split>();
+    if (!first_split->factor()->sameAs(second_split->factor()) ||
+        first_split->innerSplit() != second_split->innerSplit() ||
+        !first_split->startOffset()->sameAs(second_split->startOffset()) ||
+        !first_split->stopOffset()->sameAs(second_split->stopOffset())) {
+      return false;
+    }
+  }
+
+  if (first->isA<Swizzle2D>()) {
+    auto first_swizzle = first->as<Swizzle2D>();
+    auto second_swizzle = second->as<Swizzle2D>();
+    if (first_swizzle->swizzleMode() != second_swizzle->swizzleMode() ||
+        first_swizzle->swizzleType() != second_swizzle->swizzleType()) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+ExprGroups IdGraph::uniqueDefinitions(IdGroup group) const {
+  auto unique_defs_it = unique_definitions_.find(group);
+  TORCH_INTERNAL_ASSERT(
+      unique_defs_it != unique_definitions_.end(),
+      "Definition not found for IdGroup: ",
+      group->toString());
+  return unique_defs_it->second;
+}
+
+ExprGroups IdGraph::uniqueUses(IdGroup group) const {
+  auto unique_uses_it = unique_uses_.find(group);
+  TORCH_INTERNAL_ASSERT(
+      unique_uses_it != unique_definitions_.end(),
+      "Uses not found for IdGroup: ",
+      group->toString());
+  return unique_uses_it->second;
+}
+
+void IdGraph::mapExprs(Expr* expr0, Expr* expr1) {
+  if (expr0 == expr1) {
+    return;
+  }
+
+  if (disjointExprSets().strictAreMapped(expr0, expr1)) {
+    return;
+  }
+
+  // TODO: make these class functions for convenience, there are too many
+  // asserts in this file.
+  auto assert_get_expr_group = [&](Expr* expr) {
+    auto expr_group_pair = disjointExprSet(expr);
+    TORCH_INTERNAL_ASSERT(
+        expr_group_pair.second, "Could not find entry for expression: ", expr);
+    return expr_group_pair.first;
+  };
+
+  auto assert_get_id_group = [&](IterDomain* id) {
+    auto id_group_pair = disjointIdSet(id);
+    TORCH_INTERNAL_ASSERT(
+        id_group_pair.second, "Could not find entry for IterDomain: ", id);
+    return id_group_pair.first;
+  };
+
+  ExprGroup expr0_orig_group = assert_get_expr_group(expr0);
+  ExprGroup expr1_orig_group = assert_get_expr_group(expr1);
+
+  disjointExprSets().mapEntries(expr0, expr1);
+
+  auto expr_new_group = assert_get_expr_group(expr0);
+
+  // Update unique uses of producers
+  IdGroups producers;
+  for (auto expr : std::vector<Expr*>{expr0, expr1}) {
+    for (auto input_id : ir_utils::filterByType<IterDomain>(expr->inputs())) {
+      producers.pushBack(assert_get_id_group(input_id));
+    }
+  }
+
+  for (auto producer_group : producers) {
+    uniqueUses().at(producer_group).erase(expr0_orig_group);
+    uniqueUses().at(producer_group).erase(expr1_orig_group);
+    uniqueUses().at(producer_group).pushBack(expr_new_group);
+  }
+
+  // Update unique definitinos of consumers
+  IdGroups consumers;
+  for (auto expr : std::vector<Expr*>{expr0, expr1}) {
+    for (auto output_id : ir_utils::filterByType<IterDomain>(expr->outputs())) {
+      consumers.pushBack(assert_get_id_group(output_id));
+    }
+  }
+
+  for (auto consumer_group : consumers) {
+    uniqueDefinitions().at(consumer_group).erase(expr0_orig_group);
+    uniqueDefinitions().at(consumer_group).erase(expr1_orig_group);
+    uniqueDefinitions().at(consumer_group).pushBack(expr_new_group);
+  }
+}
+
+void IdGraph::mapIds(IterDomain* id0, IterDomain* id1) {
+  if (id0 == id1) {
+    return;
+  }
+
+  if (disjointIdSets().strictAreMapped(id0, id1)) {
+    return;
+  }
+  // Definitions and uses are based on the groups of id0 and id1, don't merge
+  // them into a single group until we grab all definitions and uses for later
+  // processing.
+  auto orig_id_group0 = disjointIdSet(id0).first;
+  auto orig_id_group1 = disjointIdSet(id1).first;
+  ExprGroups orig_defs0 = uniqueDefinitions(orig_id_group0);
+  ExprGroups orig_defs1 = uniqueDefinitions(orig_id_group1);
+  ExprGroups orig_uses0 = uniqueUses(orig_id_group0);
+  ExprGroups orig_uses1 = uniqueUses(orig_id_group1);
+
+  // Map the iter domains together before we traverse across definitions and
+  // uses. Traversing definitions and uses could use the new property of id0 and
+  // id1 being mapped.
+  disjointIdSets().mapEntries(id0, id1);
+  auto new_id_group = disjointIdSet(id0).first;
+
+  unique_definitions_.erase(orig_id_group0);
+  unique_definitions_.erase(orig_id_group1);
+  unique_uses_.erase(orig_id_group0);
+  unique_uses_.erase(orig_id_group1);
+
+  unique_definitions_[new_id_group] = orig_defs0.computeUnion(orig_defs1);
+  unique_uses_[new_id_group] = orig_uses0.computeUnion(orig_uses1);
+
+  // Propagate on uses
+  if (orig_uses0.size() > 0 || orig_uses1.size() > 0) {
+    if (orig_uses0.size() > 0 && orig_uses1.size() > 0) {
+      for (auto use_group_1 : orig_uses1) {
+        if (orig_uses0.has(use_group_1)) {
+          continue;
+        }
+
+        for (auto use_group_0 : orig_uses0) {
+          auto use0 = use_group_0->front();
+          auto use1 = use_group_1->front();
+          if (exprsMap(use0, use1, true)) {
+            mapExprs(use0, use1);
+            mapThroughExpr(use0, use1, true);
+          }
+        }
+      }
+    }
+  }
+
+  // Propagate on definitions
+  if (orig_defs0.size() > 0 || orig_defs1.size() > 0) {
+    if (orig_defs0.size() > 0 && orig_defs1.size() > 0) {
+      for (auto def_group_1 : orig_defs1) {
+        if (orig_defs0.has(def_group_1)) {
+          continue;
+        }
+
+        for (auto def_group_0 : orig_defs0) {
+          auto def0 = def_group_0->front();
+          auto def1 = def_group_1->front();
+          if (exprsMap(def0, def1, false)) {
+            mapExprs(def0, def1);
+            mapThroughExpr(def0, def1, false);
+          }
+        }
+      }
+    }
+  }
+}
+
+bool IdGraph::mapThroughExpr(Expr* first, Expr* second, bool forward) {
+  if (first == nullptr || second == nullptr) {
+    return false;
+  }
+
+  if (!exprsMap(first, second, forward)) {
+    return false;
+  }
+
+  auto first_ids = ir_utils::filterByType<IterDomain>(
+                       forward ? first->outputs() : first->inputs())
+                       .vector();
+  auto second_ids = ir_utils::filterByType<IterDomain>(
+                        forward ? second->outputs() : second->inputs())
+                        .vector();
+  TORCH_INTERNAL_ASSERT(
+      first_ids.size() == second_ids.size(),
+      "This should be unreachable, if transformation expressions match, their number of inputs and outputs should as well.\n However found:\n",
+      first->toString(),
+      "\nand\n",
+      second->toString());
+  for (auto out_i : c10::irange(first_ids.size())) {
+    mapIds(first_ids[out_i], second_ids[out_i]);
+  }
+
+  return true;
+}
+
+void IterDomainGraphs::assertNoSelfMapping() {
+  TORCH_INTERNAL_ASSERT(
+      !hasSelfMapping(),
+      "Unsupported domain mapping detected in ",
+      std::get<0>(*self_mapping_info_)->toString(),
+      ". ",
+      std::get<3>(*self_mapping_info_),
+      " domains, ",
+      std::get<1>(*self_mapping_info_)->toString(),
+      " and ",
+      std::get<2>(*self_mapping_info_)->toString(),
+      ", are mapped with each other.");
+}
+
+void IdGraph::mapThroughLoopSwizzles() {
+  for (auto use_pairs : unique_uses_) {
+    auto use_groups = use_pairs.second;
+    for (auto use_group : use_groups) {
+      for (auto use : *use_group) {
+        if (auto swizzle_2d = dynamic_cast<Swizzle2D*>(use)) {
+          // Map each input to its corresponding output on the given
+          // disjoint set if this is a loop swizzle. Loop swizzles don't impact
+          // indexing, only iteration order.
+          if (swizzle_2d->swizzleMode() == SwizzleMode::Loop) {
+            mapIds(swizzle_2d->inX(), swizzle_2d->outX());
+            mapIds(swizzle_2d->inY(), swizzle_2d->outY());
+          }
+        }
+      }
+    }
+  }
+}
+
+IterDomainGraphs::IterDomainGraphs(
+    const std::vector<Expr*>& exprs,
+    const std::vector<TensorView*>& additional_tvs,
+    bool allow_self_mapping) {
+  build(exprs, additional_tvs);
+
+  if (!allow_self_mapping) {
+    assertNoSelfMapping();
+  }
+}
+
+IterDomainGraphs::IterDomainGraphs(
+    const std::vector<Expr*>& exprs,
+    bool allow_self_mapping)
+    : IterDomainGraphs(exprs, {}, allow_self_mapping) {}
+
+IterDomainGraphs::IterDomainGraphs(Fusion* fusion, bool allow_self_mapping) {
+  std::vector<TensorView*> inputs_and_outputs;
+  {
+    auto inp_tvs = ir_utils::filterByType<TensorView>(fusion->inputs());
+    inputs_and_outputs.insert(
+        inputs_and_outputs.begin(), inp_tvs.begin(), inp_tvs.end());
+  }
+  {
+    auto out_tvs = ir_utils::filterByType<TensorView>(fusion->outputs());
+    inputs_and_outputs.insert(
+        inputs_and_outputs.begin(), out_tvs.begin(), out_tvs.end());
+  }
+
+  build(fusion->exprs(), inputs_and_outputs);
+
+  if (!allow_self_mapping) {
+    assertNoSelfMapping();
+  }
+}
+
+const IdGraph& IterDomainGraphs::idGraph(IdMappingMode mode) const {
+  auto graph_it = id_graphs_.find(mode);
+  TORCH_INTERNAL_ASSERT(graph_it != id_graphs_.end());
+  return graph_it->second;
+}
+
+IdGraph& IterDomainGraphs::idGraph(IdMappingMode mode) {
+  auto graph_it = id_graphs_.find(mode);
+  TORCH_INTERNAL_ASSERT(graph_it != id_graphs_.end());
+  return graph_it->second;
+}
+
+Expr* IterDomainGraphs::idUse(IterDomain* id) const {
+  auto use_it = id_uses_.find(id);
+  if (use_it == id_uses_.end()) {
+    return nullptr;
+  }
+  return use_it->second.front();
+}
+
+Expr* IterDomainGraphs::idDef(IterDomain* id) const {
+  auto def_it = id_definitions_.find(id);
+  if (def_it == id_definitions_.end()) {
+    return nullptr;
+  }
+  return def_it->second.front();
+}
+
+namespace {
+
+// Returns the first pair of id's in ids detected to match eachother on the
+// permissive map of the ID graph. TODO: what this is really looking for is if
+// there's any overlapping between the iter domains in the provided set.
+//
+// i.e. if we have:
+// tv0 = arange(6).view({3, 2})
+// tv1 = tv0[3, 2].t()
+// tv2 = tv0[3, 2].view({2, 3})
+// tv3 = tv1 + tv2
+//
+// Then we can see this overlap in the tv3 expression as:
+//
+// tv0 = { {0, 1, 2},
+//         {3, 4, 5} }
+//
+// tv1 = { {0, 3},
+//         {1, 4},
+//         {2, 5} }
+//
+// tv2 = { {0, 1},
+//         {2, 3},
+//         {4, 5} }
+//
+// The elements in tv1 {3, 1, 4, 2}, map respectively to the elements in tv2
+// {1, 2, 3, 4}. The reason this is so important is it means that generating
+// tv3 is no longer a trivially parallelizable problem (if we include the dag
+// all the way to tv0). So tv0's axes cannot be inlined across both the tv0
+// and tv1 path. This breaks some assumptions we have today in schedulers that
+// will assume tv2 can be trivially inlined/parallelized. Instead we'd need to
+// take into consideration the effective communication going on here, so that
+// we pull multiple values of tv0 to compute tv3.
+c10::optional<std::pair<IterDomain*, IterDomain*>> detectMappablePair(
+    const std::vector<IterDomain*>& ids,
+    const IterDomainGraphs& id_graph,
+    IdMappingMode mode) {
+  for (auto id1 : ids) {
+    for (auto id2 : ids) {
+      if (id1 == id2) {
+        continue;
+      }
+      if (id_graph.idGraph(mode).disjointIdSets().permissiveAreMapped(
+              id1, id2)) {
+        return std::make_pair(id1, id2);
+      }
+    }
+  }
+
+  return {};
+}
+
+// It is assumed that for any tensor represented by a list of domains,
+// those domains should never be mapped with each other. It may be
+// possible to lift this assumption, but it's unclear if it could
+// matter in practice.
+c10::optional<std::tuple<TensorView*, IterDomain*, IterDomain*, std::string>>
+findFirstSelfMapping(
+    const std::vector<TensorView*>& all_tvs,
+    const IterDomainGraphs& id_graph) {
+  for (auto tv : all_tvs) {
+    // For each tensor, make sure root, rfactor and leaf domains
+    // should not include domains that are mapped with another domain
+    // in the same set of domains. This may be overly conservative,
+    // and it maybe enough to check the root domains.
+
+    // Root domains
+    auto self_mappped_root_pair =
+        detectMappablePair(tv->getRootDomain(), id_graph, IdMappingMode::EXACT);
+    if (self_mappped_root_pair.has_value()) {
+      return std::make_tuple(
+          tv,
+          self_mappped_root_pair->first,
+          self_mappped_root_pair->second,
+          "Root");
+    }
+
+    // Rfactor domains
+    if (tv->hasRFactor()) {
+      auto self_mappped_rf_pair = detectMappablePair(
+          tv->getRFactorDomain(), id_graph, IdMappingMode::EXACT);
+      if (self_mappped_rf_pair.has_value()) {
+        return std::make_tuple(
+            tv,
+            self_mappped_rf_pair->first,
+            self_mappped_rf_pair->second,
+            "RFactor");
+      }
+    }
+
+    // Leaf domains
+    auto self_mappped_leaf_pair = detectMappablePair(
+        tv->domain()->domain(), id_graph, IdMappingMode::LOOP);
+    if (self_mappped_leaf_pair.has_value()) {
+      return std::make_tuple(
+          tv,
+          self_mappped_leaf_pair->first,
+          self_mappped_leaf_pair->second,
+          "Leaf");
+    }
+  }
+  return c10::nullopt;
+}
+
+} // namespace
+
+void IterDomainGraphs::buildIterDomainDefinitionsAndUses(
+    const std::vector<TensorView*>& all_tvs) {
+  for (auto tv : all_tvs) {
+    VectorOfUniqueEntries<IterDomain*> root_domain_ids{
+        tv->getRootDomain().begin(), tv->getRootDomain().end()};
+
+    auto all_ids = ir_utils::allIDsOf(tv);
+
+    // Check is this domain is a consumer of a view-like operation
+    bool view_like_domain = tv->domain()->hasViewLikeRFactor();
+
+    for (auto id : all_ids) {
+      // Check if this id is a view like rfactor id
+      if (view_like_domain && id->isRFactorProduct()) {
+        // If the tensor domain is a view like domain, and the iteration
+        // domain is marked as an rfactor product and is in the rfactor
+        // domain, it's a view like rfactor iteration domain
+        const auto& rfactor_domain = tv->domain()->getMaybeRFactorDomain();
+        if (std::find(rfactor_domain.begin(), rfactor_domain.end(), id) !=
+            rfactor_domain.end()) {
+          view_rfactor_ids_.emplace(id);
+        }
+      }
+
+      if (id_definitions_.find(id) == id_definitions_.end()) {
+        id_definitions_[id] = {};
+      }
+
+      if (id_uses_.find(id) == id_uses_.end()) {
+        id_uses_[id] = {};
+      }
+
+      auto def = id->definition();
+
+      if (def == nullptr || root_domain_ids.has(id)) {
+        continue;
+      }
+
+      if (id_definitions_.find(id) == id_definitions_.end()) {
+        id_definitions_[id] = {};
+      }
+      id_definitions_.at(id).pushBack(def);
+
+      auto inp_ids = ir_utils::filterByType<IterDomain>(def->inputs());
+      for (auto inp_id : inp_ids) {
+        if (id_uses_.find(inp_id) == id_uses_.end()) {
+          id_uses_[inp_id] = {};
+        }
+        id_uses_.at(inp_id).pushBack(def);
+      }
+    }
+  }
+}
+
+// TODO: Extend to include other information.
+std::string IterDomainGraphs::toString() const {
+  std::stringstream ss;
+  ss << "IterDomainGraphs { \n";
+  // for (auto set : disjoint_ids_) {
+  //   ss << "Set " << set.first << ": " << std::endl;
+  //   ss << set.second.toString() << std::endl;
+  // }
+  ss << " } IterDomainGraphs\n" << std::endl;
+  return ss.str();
+}
+
+// Replay Expr but with the inputs provided.
+Expr* IterDomainGraphs::addReplayAs(
+    const std::vector<IterDomain*>& new_inputs,
+    Expr* expr) {
+  // Figure out which graphs are already initialized to make sure we add the new
+  // expression to them.
+  std::vector<IdMappingMode> initialized_modes;
+  for (auto mode : kIdMappingModes) {
+    auto graph_it = id_graphs_.find(mode);
+    if (graph_it == id_graphs_.end()) {
+      continue;
+    }
+
+    auto& graph = graph_it->second;
+    if (graph.disjointIdSets().disjointSetMap().empty()) {
+      continue;
+    }
+
+    initialized_modes.push_back(mode);
+  }
+
+  auto orig_inputs = ir_utils::filterByType<IterDomain>(expr->inputs());
+  std::vector<IterDomain*> orig_input_ids(
+      orig_inputs.begin(), orig_inputs.end());
+
+  {
+    TORCH_INTERNAL_ASSERT(
+        new_inputs.size() == orig_input_ids.size(),
+        "Invalid number of inputs: ",
+        new_inputs.size(),
+        " does not match number of iter domain inputs for ",
+        expr->toString());
+
+    VectorOfUniqueEntries<IterDomain*> all_inputs{
+        orig_input_ids.begin(), orig_input_ids.end()};
+
+    all_inputs.pushBack(VectorOfUniqueEntries<IterDomain*>{
+        new_inputs.begin(), new_inputs.end()});
+
+    for (auto mode : initialized_modes) {
+      for (auto inp : all_inputs) {
+        TORCH_INTERNAL_ASSERT(
+            idGraph(mode).disjointIdSet(inp).second,
+            "All inputs for replay need to be initialized in all graphs, ",
+            inp->toString(),
+            " was not found in mode: ",
+            mode);
+      }
+    }
+  }
+
+  // Create the new expression with provided inputs
+  auto replay = ReplayTransform::replayAs(new_inputs, expr);
+
+  for (auto out_id : ir_utils::filterByType<IterDomain>(replay->outputs())) {
+    id_definitions_[out_id] = {replay};
+    id_uses_[out_id] = {};
+  }
+
+  // Add the expression to the uses of the inputs
+  for (auto inp_id : ir_utils::filterByType<IterDomain>(replay->inputs())) {
+    id_uses_.at(inp_id).pushBack(replay);
+  }
+
+  // Initialize output iter domains in the graphs
+  for (auto mode : initialized_modes) {
+    idGraph(mode).disjointExprSets().initializeSet(replay);
+    auto replay_group = idGraph(mode).disjointExprSet(replay).first;
+
+    // Initialize output ids in map
+    for (auto out_id : ir_utils::filterByType<IterDomain>(replay->outputs())) {
+      idGraph(mode).initializeId(out_id, {replay}, {});
+    }
+
+    // Update uses of the inputs in the graphs
+    for (auto inp_id : ir_utils::filterByType<IterDomain>(replay->inputs())) {
+      auto inp_group = idGraph(mode).disjointIdSet(inp_id).first;
+      idGraph(mode).uniqueUses().at(inp_group).pushBack(replay_group);
+    }
+
+    // Propagate through all the uses of the iter domain groups of the inputs
+    // with the new expression.
+    auto& graph = idGraph(mode);
+    // Gather all use expressions from inputs
+    VectorOfUniqueEntries<Expr*> representative_uses;
+    for (auto inp : new_inputs) {
+      auto uses_pair =
+          graph.iterDomainGroupUses(graph.disjointIdSet(inp).first);
+      if (uses_pair.second) {
+        for (auto use_group : uses_pair.first) {
+          representative_uses.pushBack(use_group->front());
+        }
+      }
+    }
+
+    for (auto expr : representative_uses) {
+      if (graph.exprsMap(expr, replay, true)) {
+        graph.mapExprs(expr, replay);
+        graph.mapThroughExpr(expr, replay, true);
+      }
+    }
+  }
+
+  return replay;
+}
+
+IdGraph IterDomainGraphs::initializeIdGraph() {
+  IdGraph id_graph;
+
+  for (auto definition_entry : id_definitions_) {
+    auto id = definition_entry.first;
+    auto defs = definition_entry.second;
+    auto uses_it = id_uses_.find(id);
+    TORCH_INTERNAL_ASSERT(
+        uses_it != id_uses_.end(),
+        "Failed to initialize id: ",
+        id->toString(),
+        " as it's missing a definition entry.");
+    id_graph.initializeId(id, defs, uses_it->second);
+  }
+
+  return id_graph;
+}
+
+void IterDomainGraphs::buildExactMap(const std::vector<Expr*>& exprs) {
+  for (auto expr : exprs) {
+    TensorView* c_tv = ir_utils::getTvOutput(expr);
+
+    auto all_tv_outputs = ir_utils::filterByType<TensorView>(expr->outputs());
+
+    // Map siblings, as all other tv output domains must match the first tv
+    // outputs domain.
+    std::deque<TensorView*> other_tv_outputs(
+        all_tv_outputs.begin(), all_tv_outputs.end());
+    other_tv_outputs.pop_front();
+
+    for (auto other_tv_output : other_tv_outputs) {
+      // Sibling tv's must be exactly mapped with eachother so simply zip
+      // their leaf iter domains.
+
+      TORCH_INTERNAL_ASSERT(
+          other_tv_output->getRootDomain().size() ==
+              c_tv->getRootDomain().size(),
+          "Multiple outputs with mismatched TV domains is not supported.");
+
+      for (auto domain_i : c10::irange(c_tv->getRootDomain().size())) {
+        auto c_id = c_tv->getRootDomain()[domain_i];
+        auto o_id = other_tv_output->getRootDomain()[domain_i];
+        idGraph(IdMappingMode::EXACT).mapIds(o_id, c_id);
+      }
+    }
+
+    // Map producer-consumer relationships based on the root domain map
+    auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
+    for (auto p_tv : tv_inputs) {
+      // For exact mapings do not map any broadcast dimensions to
+      // non-broadcast dimensions. Prevent any broadcasted axes being mapped
+      // to non-broadcasted axes.
+      auto exact_c2p_root_map =
+          PairwiseRootDomainMap(p_tv, c_tv, true)
+              .mapConsumerToProducer(c_tv->domain(), p_tv->domain());
+
+      for (auto c_id : getSortedKeys(exact_c2p_root_map, Statement::lessThan)) {
+        auto p_id = exact_c2p_root_map.at(c_id);
+        idGraph(IdMappingMode::EXACT).mapIds(c_id, p_id);
+      }
+    }
+
+    idGraph(IdMappingMode::EXACT).mapThroughLoopSwizzles();
+  }
+}
+
+void IterDomainGraphs::buildPermissiveMap(const std::vector<Expr*>& exprs) {
+  idGraph(IdMappingMode::PERMISSIVE) = idGraph(IdMappingMode::ALMOSTEXACT);
+
+  for (auto expr : exprs) {
+    // Multiple outputs are already mapped, we can ignore all but the first
+    // consumer given they have to be replayed in the same exact way
+    // Multiple outputs are already mapped, we can ignore all but the first
+    // consumer given they have to be replayed in the same exact way
+    TensorView* c_tv = ir_utils::getTvOutput(expr);
+
+    auto tv_inputs = ir_utils::filterByType<TensorView>(expr->inputs());
+
+    for (auto p_tv : tv_inputs) {
+      auto p_ids_vec = ir_utils::allIDsOf(p_tv);
+      auto c_ids_vec = ir_utils::allIDsOf(c_tv);
+      std::unordered_set<IterDomain*> p_ids(p_ids_vec.begin(), p_ids_vec.end());
+      std::unordered_set<IterDomain*> c_ids(c_ids_vec.begin(), c_ids_vec.end());
+
+      ForwardingInfo permissive_forwarding(p_tv, c_tv);
+      for (auto entry : permissive_forwarding.producer_forwarding_map) {
+        idGraph(IdMappingMode::PERMISSIVE).mapIds(entry.first, entry.second);
+      }
+
+      // TODO: Should this just get rolled up in the forwarding map now?
+      for (auto entry : permissive_forwarding.producer_compliment_map) {
+        for (auto entry_2 : entry.second) {
+          idGraph(IdMappingMode::PERMISSIVE).mapIds(entry.first, entry_2);
+        }
+      }
+
+      for (auto entry : permissive_forwarding.consumer_forwarding_map) {
+        idGraph(IdMappingMode::PERMISSIVE).mapIds(entry.first, entry.second);
+      }
+
+      // TODO: Should this just get rolled up in the forwarding map now?
+      for (auto entry : permissive_forwarding.consumer_compliment_map) {
+        for (auto entry_2 : entry.second) {
+          idGraph(IdMappingMode::PERMISSIVE).mapIds(entry.first, entry_2);
+        }
+      }
+
+      auto permissive_c2p_root_map = PairwiseRootDomainMap(p_tv, c_tv);
+
+      for (auto entry : permissive_c2p_root_map.mapConsumerToProducer(
+               c_tv->domain(), p_tv->domain())) {
+        idGraph(IdMappingMode::PERMISSIVE).mapIds(entry.first, entry.second);
+      }
+    }
+  }
+  idGraph(IdMappingMode::PERMISSIVE).mapThroughLoopSwizzles();
+}
+
+void IterDomainGraphs::buildAlmostExactMap() {
+  // Build almost exact map by forwarding through broadcast axes
+  idGraph(IdMappingMode::ALMOSTEXACT) = idGraph(IdMappingMode::EXACT);
+
+  VectorOfUniqueEntries<Expr*> exprs;
+  for (auto expr :
+       idGraph(IdMappingMode::ALMOSTEXACT).disjointExprSets().disjointSets()) {
+    exprs.pushBack(expr->front());
+  }
+  ExprGroups trivial_expr_groups;
+
+  // Map through trivial expressions
+  for (auto expr : exprs) {
+    auto mapped_ids = IdGraph::isTrivialExpr(expr);
+    for (auto mapped_id_group : mapped_ids) {
+      for (auto id : mapped_id_group) {
+        trivial_expr_groups.pushBack(
+            idGraph(IdMappingMode::ALMOSTEXACT).disjointExprSet(expr).first);
+        idGraph(IdMappingMode::ALMOSTEXACT).mapIds(mapped_id_group.front(), id);
+      }
+    }
+  }
+
+  // TODO: Clear out expressions that map inputs and outputs to the same group
+  // from definitions and uses. They shouldn't be important in traversal.
+  // Similar to what's drafted in buildIndexMap
+}
+
+void IterDomainGraphs::validateAndPropagatePType() const {
+  for (const auto& loop_disjoint_set :
+       idGraph(IdMappingMode::LOOP).disjointIdSets().disjointSets()) {
+    ParallelType common_ptype = ParallelType::Serial;
+    for (auto id : loop_disjoint_set->vector()) {
+      auto id_ptype = id->getParallelType();
+      TORCH_INTERNAL_ASSERT(
+          id_ptype == common_ptype || id_ptype == ParallelType::Serial ||
+              common_ptype == ParallelType::Serial,
+          "Issue validating parallel type disjoint ptype is, ",
+          common_ptype,
+          " but found in the set the id: ",
+          id->toString());
+      common_ptype =
+          common_ptype == ParallelType::Serial ? id_ptype : common_ptype;
+    }
+
+    for (auto id : loop_disjoint_set->vector()) {
+      id->parallelize(common_ptype);
+    }
+  }
+}
+
+void IterDomainGraphs::build(
+    const std::vector<Expr*>& exprs,
+    const std::vector<TensorView*>& additional_tvs) {
+  // Initialize the required sets as if a permissive relationship is never
+  // found, then querying an empty permissive map will fail later.
+  // Initialize disjoint sets
+  for (auto mode : kIdMappingModes) {
+    id_graphs_[mode] = IdGraph();
+  }
+
+  std::vector<Expr*> tv_exprs;
+
+  std::copy_if(
+      exprs.begin(), exprs.end(), std::back_inserter(tv_exprs), [](Expr* expr) {
+        TORCH_INTERNAL_ASSERT(expr != nullptr);
+        return ir_utils::isTvOp(expr);
+      });
+
+  auto all_tvs = ir_utils::allTvsOfExprs(tv_exprs);
+  if (additional_tvs.size() > 0) {
+    std::unordered_set<TensorView*> all_added_tvs(
+        all_tvs.begin(), all_tvs.end());
+    for (auto additional_tv : additional_tvs) {
+      if (all_added_tvs.find(additional_tv) == all_added_tvs.end()) {
+        all_tvs.push_back(additional_tv);
+      }
+    }
+  }
+
+  if (all_tvs.empty()) {
+    return;
+  }
+
+  FusionGuard fg(all_tvs.front()->fusion());
+  FusionGuard::getCurFusion()->print();
+  // Add uses and definitions to all iter domains.
+  buildIterDomainDefinitionsAndUses(all_tvs);
+
+  // Initialize the maps with all the IterDomains used in the provded
+  // expressions.
+  idGraph(IdMappingMode::EXACT) = initializeIdGraph();
+
+  buildExactMap(tv_exprs);
+
+  buildAlmostExactMap();
+
+  buildPermissiveMap(tv_exprs);
+
+  // Only build loop map during lowering
+  if (FusionGuard::getCurFusion()->isA<kir::Kernel>()) {
+    idGraph(IdMappingMode::LOOP) = initializeIdGraph();
+
+    // Find loops that need to be promoted because of broadcast resolution,
+    // figure out what that resolution should look like, compute IDs for it if
+    // necessary.
+    buildLoopPromotionMap(tv_exprs);
+
+    std::cout << "Built Loop map:" << std::endl;
+    for (auto entry :
+         idGraph(IdMappingMode::LOOP).disjointIdSets().disjointSets()) {
+      std::cout << entry->toString() << std::endl;
+      std::cout << "-> " << loop_promotion_map_.at(entry) << std::endl;
+    }
+
+    TORCH_INTERNAL_ASSERT(false);
+
+    validateAndPropagatePType();
+  }
+
+  // Debug, make sure there's no self mapping in TensorView's during lowering
+  // that would invalidate lowering assumptions.
+  self_mapping_info_ = findFirstSelfMapping(all_tvs, *this);
+}
+
+namespace {
+
+// Returns the root producer iteration domains that are resolved by provided
+// consumer
+std::unordered_map<IterDomain*, IterDomain*> resolvedRootBroadcasts(
+    TensorView* producer,
+    TensorView* consumer) {
+  auto p2c_map =
+      PairwiseRootDomainMap(producer, consumer)
+          .mapProducerToConsumer(producer->domain(), consumer->domain());
+
+  std::unordered_map<IterDomain*, IterDomain*> resolved_bcast_map;
+  for (const auto& kv : p2c_map) {
+    auto p_id = kv.first;
+    // Ignore non-broadcast dims
+    if (!p_id->isBroadcast()) {
+      continue;
+    }
+    auto c_id = kv.second;
+    // If the consumer ID is a reduction (i.e., a trivial
+    // reduction), do not consider it's concretized.
+    if (c_id->isBroadcast() || c_id->isReduction()) {
+      continue;
+    }
+    resolved_bcast_map[p_id] = c_id;
+  }
+  return resolved_bcast_map;
+}
+
+} // namespace
+
+std::unordered_map<IdGroup, IdGroups> IterDomainGraphs::
+    buildCoveredAlmostExact() {
   // Helper functions.
   auto producerIdGroups = [&](IdGroup id_group) {
     IdGroups producer_groups;
-    auto definition_pair_it =
-        getIterDomainGroupDefinitions(id_group, IdMappingMode::ALMOSTEXACT);
+    auto definition_pair_it = idGraph(IdMappingMode::ALMOSTEXACT)
+                                  .iterDomainGroupDefinitions(id_group);
     if (!definition_pair_it.second) {
       return producer_groups;
     }
     for (auto def_group : definition_pair_it.first) {
-      auto inp_groups = inputGroups(def_group, IdMappingMode::ALMOSTEXACT);
+      auto inp_groups =
+          idGraph(IdMappingMode::ALMOSTEXACT).inputGroups(def_group);
       producer_groups.pushBack(inp_groups);
     }
     return producer_groups;
@@ -1812,12 +1722,13 @@ std::unordered_map<IdGroup, IdGroups> IterDomainGraph::
   auto consumerIdGroups = [&](IdGroup id_group) {
     IdGroups consumer_groups;
     auto uses_pair_it =
-        getIterDomainGroupUses(id_group, IdMappingMode::ALMOSTEXACT);
+        idGraph(IdMappingMode::ALMOSTEXACT).iterDomainGroupUses(id_group);
     if (!uses_pair_it.second) {
       return consumer_groups;
     }
     for (auto use_group : uses_pair_it.first) {
-      auto out_groups = outputGroups(use_group, IdMappingMode::ALMOSTEXACT);
+      auto out_groups =
+          idGraph(IdMappingMode::ALMOSTEXACT).outputGroups(use_group);
       consumer_groups.pushBack(out_groups);
     }
     return consumer_groups;
@@ -1837,7 +1748,7 @@ std::unordered_map<IdGroup, IdGroups> IterDomainGraph::
   IdGroups to_visit;
   // Initialize covered groups
   for (auto almost_exact_set :
-       getDisjointIdSets(IdMappingMode::ALMOSTEXACT).disjointSets()) {
+       idGraph(IdMappingMode::ALMOSTEXACT).disjointIdSets().disjointSets()) {
     // what broadcast domains cover doesn't matter
     if (std::all_of(
             almost_exact_set->begin(),
@@ -1861,8 +1772,8 @@ std::unordered_map<IdGroup, IdGroups> IterDomainGraph::
 
     // Initialize any groups that don't have a definition except (potentialy)
     // ones that traverse back to this set.
-    auto def_pair = getIterDomainGroupDefinitions(
-        almost_exact_set, IdMappingMode::ALMOSTEXACT);
+    auto def_pair = idGraph(IdMappingMode::ALMOSTEXACT)
+                        .iterDomainGroupDefinitions(almost_exact_set);
     if (!def_pair.second) {
       covered_almost_exact_entries[almost_exact_set] = {almost_exact_set};
       to_visit.pushBack(consumerIdGroups(almost_exact_set));
@@ -1873,7 +1784,7 @@ std::unordered_map<IdGroup, IdGroups> IterDomainGraph::
       // If all definitions are self mapping (can happen with
       // merging our splitting with a broadcast/ dim of size 1)
       // then this group is an input.
-      auto inp_groups = inputGroups(def, IdMappingMode::ALMOSTEXACT);
+      auto inp_groups = idGraph(IdMappingMode::ALMOSTEXACT).inputGroups(def);
       if (std::find(inp_groups.begin(), inp_groups.end(), almost_exact_set) ==
           inp_groups.end()) {
         goto loop_continue;
@@ -1886,9 +1797,9 @@ std::unordered_map<IdGroup, IdGroups> IterDomainGraph::
   loop_continue:;
   }
 
-  // == Stage 1 (cont) ==: Starting from the initialized inputs propagate
-  // forward from those inputs to mark what every iter domain in the graph
-  // covers. This will be used in later analysis.
+  // Starting from the initialized inputs propagate forward from those inputs to
+  // mark what every iter domain in the graph covers. This will be used in later
+  // analysis.
   while (to_visit.size() > 0) {
     IdGroups still_to_visit;
     bool something_processed = false;
@@ -1930,8 +1841,7 @@ std::unordered_map<IdGroup, IdGroups> IterDomainGraph::
   return covered_almost_exact_entries;
 }
 
-void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
-
+void IterDomainGraphs::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
   // == Stage 1 ==: This stage is primarily like concrete ID finding. We're
   // going to initialize all the terminating inputs and all of the rfactor
   // groups in the almost exact map to simply "cover" themselves. Cover really
@@ -1939,7 +1849,7 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
   // that cover all the concrete IDs that they should loop over in part or
   // entirely.
   auto covered_almost_exact_entries = buildCoveredAlmostExact();
-  
+
   // == Stage 2 ==: Calculate which iter domains are shared across producers
   // and consumers. Shared iter domains are from inlining, they're the iter
   // domains within the compute at position and max produce at position of
@@ -2025,8 +1935,9 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
         for (auto entry : resolved_bcast_map) {
           accumulateInMap(
               p2c_root_broadcast_resolution_map, entry.first, entry.second);
-          for (auto other_exact_bcast :
-               *getDisjointIdSet(entry.first, IdMappingMode::EXACT).first) {
+          for (auto other_exact_bcast : *idGraph(IdMappingMode::EXACT)
+                                             .disjointIdSet(entry.first)
+                                             .first) {
             if (all_producer_ca_deps.has(other_exact_bcast)) {
               accumulateInMap(
                   p2c_root_broadcast_resolution_map,
@@ -2036,10 +1947,10 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
           }
         }
 
-        auto p2c_ca_permissive_map = buildMapBetween(
-            all_producer_ca_deps.vector(),
-            ir_utils::allIDsOf(consumer),
-            IdMappingMode::PERMISSIVE);
+        auto p2c_ca_permissive_map = idGraph(IdMappingMode::PERMISSIVE)
+                                         .buildMapBetween(
+                                             all_producer_ca_deps.vector(),
+                                             ir_utils::allIDsOf(consumer));
 
         for (auto entry : p2c_ca_permissive_map) {
           if (entry.second.size() == 0) {
@@ -2051,55 +1962,13 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
     }
   }
 
-  // Initialize loop map. This needs to be done just like we would in
-  // "initializeId" for the exact map. Unlike AlmostExact and Permissive, loop
-  // map is not a superset of the exact map so we can't simply start by copying
-  // the exact map over.
-  for (auto group : getDisjointIdSets(IdMappingMode::EXACT).disjointSets()) {
-    for (auto id : *group) {
-      auto id_disjoint_set =
-          disjointIdsSet(IdMappingMode::LOOP).initializeSet(id).first->second;
-
-      auto def_it = id_definitions_.find(id);
-      if (def_it != id_definitions_.end()) {
-        auto defs = def_it->second;
-        if (defs.size() > 0) {
-          ExprGroups expr_groups;
-          for (auto def : defs) {
-            auto expr_set = disjointExprsSet(IdMappingMode::LOOP)
-                                .initializeSet(def)
-                                .first->second;
-            expr_groups.pushBack(expr_set);
-          }
-          unique_definitions_[IdMappingMode::LOOP][id_disjoint_set] =
-              expr_groups;
-        }
-      }
-
-      auto use_it = id_uses_.find(id);
-      if (use_it != id_uses_.end()) {
-        auto uses = use_it->second;
-        if (uses.size() > 0) {
-          ExprGroups expr_groups;
-          for (auto use : uses) {
-            auto expr_set = disjointExprsSet(IdMappingMode::LOOP)
-                                .initializeSet(use)
-                                .first->second;
-            expr_groups.pushBack(expr_set);
-          }
-          unique_uses_[IdMappingMode::LOOP][id_disjoint_set] = expr_groups;
-        }
-      }
-    }
-  }
-
   // == Stage 3 ==: Start accumulating the loop map. Loop map is all about
   // iter domain promotion so we can initialize it easily with the c2p
   // permissive map from processing all the inlined iter domains.
   for (auto entry : p2c_ca_permissive_maps) {
     auto first = entry.first;
     for (auto second : entry.second) {
-      mapIds(first, second, IdMappingMode::LOOP);
+      idGraph(IdMappingMode::LOOP).mapIds(first, second);
     }
   }
 
@@ -2129,7 +1998,7 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
   // Loop map will get updated as we go, make a copy to iterate on and use as a
   // promotion map
   DisjointSets<IterDomain*> loop_map_copy =
-      getDisjointIdSets(IdMappingMode::LOOP);
+      idGraph(IdMappingMode::LOOP).disjointIdSets();
   IdGroups ordered_loop_groups;
 
   auto disjoint_group_loop_copy = [&loop_map_copy](IterDomain* id) {
@@ -2172,11 +2041,12 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
         // reproduce transformations for this resolution. However, we simply use
         // almost exact map to figure out what IterDomain sets need to be
         // covered.
-        auto exact_group_pair = getDisjointIdSet(entry, IdMappingMode::EXACT);
+        auto exact_group_pair =
+            idGraph(IdMappingMode::EXACT).disjointIdSet(entry);
         TORCH_INTERNAL_ASSERT(exact_group_pair.second);
         terminal_ids.pushBack(exact_group_pair.first);
         auto almost_exact_group_pair =
-            getDisjointIdSet(entry, IdMappingMode::ALMOSTEXACT);
+            idGraph(IdMappingMode::ALMOSTEXACT).disjointIdSet(entry);
         TORCH_INTERNAL_ASSERT(almost_exact_group_pair.second);
         to_cover.pushBack(
             covered_almost_exact_entries.at(almost_exact_group_pair.first));
@@ -2198,7 +2068,8 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
       // Almost exact should be a super set of exact which is where the
       // terminal_id is placed
       auto almost_exact_terminal_pair =
-          getDisjointIdSet(terminal_id->front(), IdMappingMode::ALMOSTEXACT);
+          idGraph(IdMappingMode::ALMOSTEXACT)
+              .disjointIdSet(terminal_id->front());
       TORCH_INTERNAL_ASSERT(almost_exact_terminal_pair.second);
       if (to_cover
               .subtract(covered_almost_exact_entries.at(
@@ -2214,8 +2085,7 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
       continue;
     }
 
-
-    // Check if we can more easily build 
+    // Check if we can more easily build
 
     // None of the terminal_ids have all the required IterDomains covered.
     // Generate a new IterDomain that satisfies the requirement of covering
@@ -2230,7 +2100,8 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
     IdGroups start_point;
     for (auto group : to_cover) {
       for (auto id : *group) {
-        start_point.pushBack(getDisjointIdSet(id, IdMappingMode::EXACT).first);
+        start_point.pushBack(
+            idGraph(IdMappingMode::EXACT).disjointIdSet(id).first);
       }
     }
 
@@ -2243,12 +2114,12 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
       auto tos = entry.second;
       for (auto to : tos) {
         if (to_cover.has(
-                getDisjointIdSet(to, IdMappingMode::ALMOSTEXACT).first)) {
+                idGraph(IdMappingMode::ALMOSTEXACT).disjointIdSet(to).first)) {
           // TODO: Make sure we're not trying to broadcast the same thing to
           // two different extents.
-          bcast_promotion_map[getDisjointIdSet(from, IdMappingMode::EXACT)
-                                  .first] =
-              getDisjointIdSet(to, IdMappingMode::EXACT).first;
+          bcast_promotion_map
+              [idGraph(IdMappingMode::EXACT).disjointIdSet(from).first] =
+                  idGraph(IdMappingMode::EXACT).disjointIdSet(to).first;
         }
       }
     }
@@ -2258,8 +2129,8 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
     }
 
     // Grab all expresions that need to be replayed.
-    auto transform_exprs =
-        getExprsBetween(start_point, terminal_ids, IdMappingMode::EXACT);
+    auto transform_exprs = idGraph(IdMappingMode::EXACT)
+                               .getExprsBetween(start_point, terminal_ids);
 
     // This replay has really bad complexity. Think about having IterDomains
     // that are dependent on eachother:
@@ -2290,7 +2161,8 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
     // Perform replay
     for (auto transform_expr : transform_exprs) {
       std::vector<IterDomain*> new_input_ids;
-      for (auto inp_group : inputGroups(transform_expr, IdMappingMode::EXACT)) {
+      for (auto inp_group :
+           idGraph(IdMappingMode::EXACT).inputGroups(transform_expr)) {
         auto bcast_promo_it = bcast_promotion_map.find(inp_group);
         if (bcast_promo_it != bcast_promotion_map.end()) {
           new_input_ids.push_back(bcast_promo_it->second->front());
@@ -2305,8 +2177,7 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
         new_input_ids.push_back(inp_group->front());
       }
 
-      auto replayed_expr = addReplayAs(
-          new_input_ids, transform_expr->front(), IdMappingMode::PERMISSIVE, true);
+      auto replayed_expr = addReplayAs(new_input_ids, transform_expr->front());
 
       auto orig_outputs_ids =
           ir_utils::filterByType<IterDomain>(transform_expr->front()->outputs())
@@ -2320,9 +2191,9 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
       // Add outputs to promotion map
       for (auto id_i : c10::irange(orig_outputs_ids.size())) {
         auto orig_set_pair =
-            getDisjointIdSet(orig_outputs_ids[id_i], IdMappingMode::EXACT);
+            idGraph(IdMappingMode::EXACT).disjointIdSet(orig_outputs_ids[id_i]);
         auto replay_set_pair =
-            getDisjointIdSet(new_outputs_ids[id_i], IdMappingMode::EXACT);
+            idGraph(IdMappingMode::EXACT).disjointIdSet(new_outputs_ids[id_i]);
         TORCH_INTERNAL_ASSERT(orig_set_pair.second && replay_set_pair.second);
         local_promotion_map[orig_set_pair.first] = replay_set_pair.first;
       }
@@ -2356,7 +2227,8 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
   for (auto promotion_map_entry : promotion_map) {
     for (auto from_id : *promotion_map_entry.first) {
       auto to_id = promotion_map_entry.second;
-      if (!getDisjointIdSets(IdMappingMode::ALMOSTEXACT)
+      if (!idGraph(IdMappingMode::ALMOSTEXACT)
+               .disjointIdSets()
                .permissiveAreMapped(from_id, to_id)) {
         id_promotion_map[from_id] = to_id;
       }
@@ -2403,7 +2275,8 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
         auto promoted_id = promoted_entry_it->second;
         // If the promoted IterDomain is the same size as this one, no need to
         // promote it.
-        if (getDisjointIdSets(IdMappingMode::ALMOSTEXACT)
+        if (idGraph(IdMappingMode::ALMOSTEXACT)
+                .disjointIdSets()
                 .permissiveAreMapped(promoted_id, id)) {
           continue;
         }
@@ -2426,7 +2299,7 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
             ir_utils::filterByType<IterDomain>(transform_expr->inputs());
         IdGroups input_promo_groups;
         for (auto inp : id_inputs) {
-          auto loop_set_pair = getDisjointIdSet(inp, IdMappingMode::LOOP);
+          auto loop_set_pair = idGraph(IdMappingMode::LOOP).disjointIdSet(inp);
           if (loop_set_pair.second) {
             input_promo_groups.pushBack(loop_set_pair.first);
           }
@@ -2436,7 +2309,7 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
             ir_utils::filterByType<IterDomain>(transform_expr->outputs());
         IdGroups output_promo_groups;
         for (auto out : id_outputs) {
-          auto loop_set_pair = getDisjointIdSet(out, IdMappingMode::LOOP);
+          auto loop_set_pair = idGraph(IdMappingMode::LOOP).disjointIdSet(out);
           if (loop_set_pair.second) {
             output_promo_groups.pushBack(loop_set_pair.first);
           }
@@ -2471,8 +2344,7 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
           continue;
         }
 
-        auto replay =
-            addReplayAs(input_copy, transform_expr, IdMappingMode::PERMISSIVE, true);
+        auto replay = addReplayAs(input_copy, transform_expr);
 
         auto orig_outputs_ids =
             ir_utils::filterByType<IterDomain>(transform_expr->outputs())
@@ -2500,8 +2372,8 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
 
   // Make a copy as loop goups may change as we update them
   IdGroups loop_groups{
-      disjointIdsSet(IdMappingMode::LOOP).disjointSets().begin(),
-      disjointIdsSet(IdMappingMode::LOOP).disjointSets().end()};
+      idGraph(IdMappingMode::LOOP).disjointIdSets().disjointSets().begin(),
+      idGraph(IdMappingMode::LOOP).disjointIdSets().disjointSets().end()};
 
   for (auto loop_group : loop_groups) {
     // Make sure the loop groups aren't promoted to multiple iter domains.
@@ -2515,7 +2387,8 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
         promoted_id = promoted_id_it->second;
       } else {
         TORCH_INTERNAL_ASSERT(
-            getDisjointIdSets(IdMappingMode::ALMOSTEXACT)
+            idGraph(IdMappingMode::ALMOSTEXACT)
+                .disjointIdSets()
                 .strictAreMapped(promoted_id, promoted_id_it->second),
             "Conflicting promotions found: ",
             loop_group->toString(),
@@ -2534,31 +2407,34 @@ void IterDomainGraph::buildLoopPromotionMap(const std::vector<Expr*>& exprs) {
   }
 }
 
-void IterDomainGraph::buildIndexMap(const std::vector<TensorView*>& all_tvs) {
+void IterDomainGraphs::buildIndexMap(const std::vector<TensorView*>& all_tvs) {
   // Initialize map at loop leaf nodes. This needs to be done just like we
   // would in "initializeId" for the exact map. Unlike AlmostExact and
   // Permissive, index map is not a superset of exact map.
   for (auto loop_group :
-       getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
+       idGraph(IdMappingMode::LOOP).disjointIdSets().disjointSets()) {
     for (auto id : *loop_group) {
-      auto id_disjoint_set =
-          disjointIdsSet(IdMappingMode::INDEX).initializeSet(id).first->second;
+      auto id_disjoint_set = idGraph(IdMappingMode::INDEX)
+                                 .disjointIdSets()
+                                 .initializeSet(id)
+                                 .first->second;
 
       auto def_it = id_definitions_.find(id);
       if (def_it != id_definitions_.end()) {
         auto defs = def_it->second;
         ExprGroups expr_groups;
         for (auto def : defs) {
-          auto expr_set = disjointExprsSet(IdMappingMode::INDEX)
+          auto expr_set = idGraph(IdMappingMode::INDEX)
+                              .disjointExprSets()
                               .initializeSet(def)
                               .first->second;
           expr_groups.pushBack(expr_set);
         }
-        unique_definitions_[IdMappingMode::INDEX][id_disjoint_set] =
+        idGraph(IdMappingMode::INDEX).uniqueDefinitions()[id_disjoint_set] =
             expr_groups;
       } else {
         id_definitions_[id] = {};
-        unique_definitions_[IdMappingMode::INDEX][id_disjoint_set] = {};
+        idGraph(IdMappingMode::INDEX).uniqueDefinitions()[id_disjoint_set] = {};
       }
 
       auto use_it = id_uses_.find(id);
@@ -2566,15 +2442,17 @@ void IterDomainGraph::buildIndexMap(const std::vector<TensorView*>& all_tvs) {
         auto uses = use_it->second;
         ExprGroups expr_groups;
         for (auto use : uses) {
-          auto expr_set = disjointExprsSet(IdMappingMode::INDEX)
+          auto expr_set = idGraph(IdMappingMode::INDEX)
+                              .disjointExprSets()
                               .initializeSet(use)
                               .first->second;
           expr_groups.pushBack(expr_set);
         }
-        unique_uses_[IdMappingMode::INDEX][id_disjoint_set] = expr_groups;
+        idGraph(IdMappingMode::INDEX).uniqueUses()[id_disjoint_set] =
+            expr_groups;
       } else {
         id_uses_[id] = {};
-        unique_uses_[IdMappingMode::INDEX][id_disjoint_set] = {};
+        idGraph(IdMappingMode::INDEX).uniqueUses()[id_disjoint_set] = {};
       }
     }
   }
@@ -2582,49 +2460,34 @@ void IterDomainGraph::buildIndexMap(const std::vector<TensorView*>& all_tvs) {
   // Below is the same as building the almost exact map. It just maps through
   // trivial expressions and removes their traversal from definition/uses
   VectorOfUniqueEntries<Expr*> exprs;
-  for (auto expr : getDisjointExprSets(IdMappingMode::INDEX).disjointSets()) {
+  for (auto expr :
+       idGraph(IdMappingMode::INDEX).disjointExprSets().disjointSets()) {
     exprs.pushBack(expr->front());
   }
   ExprGroups trivial_expr_groups;
 
   // Map through trivial expressions
   for (auto expr : exprs) {
-    auto mapped_ids = isTrivialExpr(expr);
+    auto mapped_ids = IdGraph::isTrivialExpr(expr);
     for (auto mapped_id_group : mapped_ids) {
       for (auto id : mapped_id_group) {
         trivial_expr_groups.pushBack(
-            getDisjointExprSet(expr, IdMappingMode::INDEX).first);
-        mapIds(mapped_id_group.front(), id, IdMappingMode::INDEX);
+            idGraph(IdMappingMode::INDEX).disjointExprSet(expr).first);
+        idGraph(IdMappingMode::INDEX).mapIds(mapped_id_group.front(), id);
       }
     }
   }
 
-  std::cout << "Trivial expr groups: " << std::endl;
-  std::cout << debug_print::exprGroupsStringShort(
-      *this, trivial_expr_groups, IdMappingMode::INDEX);
-
-  std::cout << "All index expr definitions 1:" << std::endl;
-  std::cout << debug_print::definitionsToString(*this, IdMappingMode::INDEX)
-            << std::endl;
-
   // Clear out expressions that map inputs and outputs to the same group from
   // definitions and uses. They shouldn't be important in traversal. Iterate
   // on a copy as we're updating the map as we traverse.
-  auto def_copy = unique_definitions_.at(IdMappingMode::INDEX);
-  for (auto& id_2_expr_group_map_entry : def_copy) {
+  std::unordered_map<IdGroup, ExprGroups> defs_copy =
+      idGraph(IdMappingMode::INDEX).uniqueDefinitions();
+  for (auto& id_2_expr_group_map_entry : defs_copy) {
     ExprGroups expr_groups_new;
     for (auto& expr_group : id_2_expr_group_map_entry.second) {
       if (!trivial_expr_groups.has(expr_group)) {
-        std::cout << "Keep: "
-                  << debug_print::exprGroupStringShort(
-                         *this, expr_group, IdMappingMode::INDEX)
-                  << std::endl;
         expr_groups_new.pushBack(expr_group);
-      } else {
-        std::cout << "Remove: "
-                  << debug_print::exprGroupStringShort(
-                         *this, expr_group, IdMappingMode::INDEX)
-                  << std::endl;
       }
     }
 
@@ -2632,16 +2495,13 @@ void IterDomainGraph::buildIndexMap(const std::vector<TensorView*>& all_tvs) {
       continue;
     }
 
-    unique_definitions_[IdMappingMode::INDEX][id_2_expr_group_map_entry.first] =
-        expr_groups_new;
+    idGraph(IdMappingMode::INDEX)
+        .uniqueDefinitions()[id_2_expr_group_map_entry.first] = expr_groups_new;
   }
 
-  std::cout << "All index expr definitions 2:" << std::endl;
-  std::cout << debug_print::definitionsToString(*this, IdMappingMode::INDEX)
-            << std::endl;
-
-  auto use_copy = unique_uses_.at(IdMappingMode::INDEX);
-  for (auto& id_2_expr_group_map_entry : use_copy) {
+  std::unordered_map<IdGroup, ExprGroups> uses_copy =
+      idGraph(IdMappingMode::INDEX).uniqueUses();
+  for (auto& id_2_expr_group_map_entry : uses_copy) {
     ExprGroups expr_groups_new;
     for (auto expr_group : id_2_expr_group_map_entry.second) {
       if (!trivial_expr_groups.has(expr_group)) {
@@ -2660,15 +2520,13 @@ void IterDomainGraph::buildIndexMap(const std::vector<TensorView*>& all_tvs) {
       }
     }
 
-    unique_uses_[IdMappingMode::INDEX][id_2_expr_group_map_entry.first] =
-        expr_groups_new;
+    idGraph(IdMappingMode::INDEX)
+        .uniqueUses()[id_2_expr_group_map_entry.first] = expr_groups_new;
   }
 
   for (auto loop_group :
-       getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
+       idGraph(IdMappingMode::LOOP).disjointIdSets().disjointSets()) {
     auto loop_promotion_it = loop_promotion_map_.find(loop_group);
-    std::cout << debug_print::idGroupStringShort(loop_group) << " -> "
-              << loop_promotion_map_.at(loop_group) << std::endl;
   }
   IdGroups processed;
 
@@ -2677,7 +2535,7 @@ void IterDomainGraph::buildIndexMap(const std::vector<TensorView*>& all_tvs) {
       continue;
     }
     for (auto id : tv->domain()->domain()) {
-      auto loop_group_pair = getDisjointIdSet(id, IdMappingMode::LOOP);
+      auto loop_group_pair = idGraph(IdMappingMode::LOOP).disjointIdSet(id);
       TORCH_INTERNAL_ASSERT(
           loop_group_pair.second,
           "Loop group not found for leaf id: ",
@@ -2691,18 +2549,15 @@ void IterDomainGraph::buildIndexMap(const std::vector<TensorView*>& all_tvs) {
       auto loop_promotion_it = loop_promotion_map_.find(loop_group);
       TORCH_INTERNAL_ASSERT(loop_promotion_it != loop_promotion_map_.end());
       IterDomain* promoted_id = loop_promotion_it->second;
-      std::cout << "Promoted: " << id->toString() << " -> "
-                << promoted_id->toString() << std::endl;
 
       for (auto loop_group_id : *loop_group) {
         if (loop_group_id == promoted_id) {
           continue;
         }
-        if (getDisjointIdSets(IdMappingMode::ALMOSTEXACT)
+        if (idGraph(IdMappingMode::ALMOSTEXACT)
+                .disjointIdSets()
                 .permissiveAreMapped(loop_group_id, promoted_id)) {
-          // std::cout << "Map: " << loop_group_id->toString() << " <-> "
-          //           << promoted_id->toString() << std::endl;
-          mapIds(loop_group_id, promoted_id, IdMappingMode::INDEX);
+          idGraph(IdMappingMode::INDEX).mapIds(loop_group_id, promoted_id);
         }
       }
     }
@@ -2710,7 +2565,7 @@ void IterDomainGraph::buildIndexMap(const std::vector<TensorView*>& all_tvs) {
 }
 
 ComputeAtMap::ComputeAtMap(Fusion* fusion)
-    : id_graph_(fusion), concretized_bcasts_(fusion), fusion_(fusion) {
+    : id_graphs_(fusion), concretized_bcasts_(fusion), fusion_(fusion) {
   build(fusion);
 }
 
@@ -2758,8 +2613,8 @@ bool ComputeAtMap::indexingReachableFrom(
     auto currently_visiting = to_visit.front();
     to_visit.pop_front();
 
-    auto defs_it = id_graph_.getIterDomainGroupDefinitions(
-        currently_visiting, IdMappingMode::ALMOSTEXACT);
+    auto defs_it = id_graphs_.idGraph(IdMappingMode::ALMOSTEXACT)
+                       .iterDomainGroupDefinitions(currently_visiting);
     if (!defs_it.second) {
       // TODO: Don't use ->definition()
       TORCH_INTERNAL_ASSERT(
@@ -2873,14 +2728,14 @@ void ComputeAtMap::testValidate() {
   //     VectorOfUniqueEntries<IterDomain*> loop_ids;
   //     for (auto id : tv->domain()->domain()) {
   //       // Traverse the promotion map until a leaf is found
-  //       IterDomain* promoted_id = id_graph_.getMaybePromoted(id);
+  //       IterDomain* promoted_id = id_graphs_.getMaybePromoted(id);
 
-  //       while (promoted_id != id_graph_.getMaybePromoted(promoted_id)) {
-  //         promoted_id = id_graph_.getMaybePromoted(promoted_id);
+  //       while (promoted_id != id_graphs_.getMaybePromoted(promoted_id)) {
+  //         promoted_id = id_graphs_.getMaybePromoted(promoted_id);
   //       }
 
   //       TORCH_INTERNAL_ASSERT(
-  //           id_graph_.getDisjointIdSets(IdMappingMode::LOOP)
+  //           id_graphs_.idGraph(IdMappingMode::LOOP).disjointIdSets()
   //               .mappingExists(promoted_id),
   //           "Loop id's aren't inclusive, as a producer could look to
   //           promote to an IterDomain that's not a consumer's leaf domain.",
@@ -2919,8 +2774,9 @@ void ComputeAtMap::allocateIndexVariables() {
   // Run through all disjoint sets registered in loop map,
   //  all lowered kir::ForLoop will correspond to one of the disjoint sets
   //  and we only need one index variable for each set.
-  for (const auto& loop_disjoint_set :
-       id_graph_.getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
+  for (const auto& loop_disjoint_set : id_graphs_.idGraph(IdMappingMode::LOOP)
+                                           .disjointIdSets()
+                                           .disjointSets()) {
     ParallelType ptype;
     // first allocate thread and grid parallel indices:
     //  The validation pass will check that the parallel bindings within the
@@ -2989,12 +2845,14 @@ Val* ComputeAtMap::getIndexVariable(
     IterDomain* id,
     DoubleBufferLoopStage double_buffer_loop_stage) const {
   TORCH_INTERNAL_ASSERT(
-      id_graph_.getDisjointIdSets(IdMappingMode::LOOP).mappingExists(id),
+      id_graphs_.idGraph(IdMappingMode::LOOP)
+          .disjointIdSets()
+          .mappingExists(id),
       "Index Variable: no index variable allocated as ",
       id->toString(),
       " is not registered in loop map");
   const auto* loop_set =
-      id_graph_.getDisjointIdSet(id, IdMappingMode::LOOP).first.get();
+      id_graphs_.idGraph(IdMappingMode::LOOP).disjointIdSet(id).first.get();
 
   // Check if this loop was modified by double buffer pass.
   bool is_double_buffer_iterdomain =
@@ -3054,7 +2912,7 @@ IterDomain* ComputeAtMap::computeConcreteId(
     }
     if (id_output) {
       auto disjoint_set_pair =
-          id_graph_.getDisjointIdSet(disjoint_id, IdMappingMode::EXACT);
+          id_graphs_.idGraph(IdMappingMode::EXACT).disjointIdSet(disjoint_id);
       TORCH_INTERNAL_ASSERT(disjoint_set_pair.second);
       maybe_concrete_to_id[disjoint_set_pair.first] = disjoint_id;
       maybe_concrete_ids.pushBack(disjoint_set_pair.first);
@@ -3244,17 +3102,17 @@ void ComputeAtMap::buildConsumersMap() {
 
     for (auto consumer : consumers) {
       auto all_consumer_ids = ir_utils::allIDsOf(consumer);
-      // Change data structure for IterDomainGraph::buildMapBetween
+      // Change data structure for IterDomainGraphs::buildMapBetween
       VectorOfUniqueEntries<IterDomain*> consumer_ids(
           all_consumer_ids.begin(), all_consumer_ids.end());
       for (auto producer : producers) {
         auto all_producer_ids = ir_utils::allIDsOf(producer);
-        // Change data structure for IterDomainGraph::buildMapBetween
+        // Change data structure for IterDomainGraphs::buildMapBetween
         VectorOfUniqueEntries<IterDomain*> producer_ids(
             all_producer_ids.begin(), all_producer_ids.end());
 
-        auto p2c = id_graph_.buildMapBetween(
-            producer_ids, consumer_ids, IdMappingMode::PERMISSIVE);
+        auto p2c = id_graphs_.idGraph(IdMappingMode::PERMISSIVE)
+                       .buildMapBetween(producer_ids, consumer_ids);
 
         consumers_map_.insert(p2c.begin(), p2c.end());
       }
@@ -3268,7 +3126,9 @@ void ComputeAtMap::buildConcreteIds() {
   // run-to-run deterministic but which ID gets selected her depends on the
   // traversal order generating the set (compute at map build).
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdSets(IdMappingMode::EXACT).disjointSets()) {
+       id_graphs_.idGraph(IdMappingMode::EXACT)
+           .disjointIdSets()
+           .disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");
@@ -3279,7 +3139,9 @@ void ComputeAtMap::buildConcreteIds() {
   // The following two algorithms seem quite wasteful. Should find a more
   // efficient way to compute concrete IDs.
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdSets(IdMappingMode::PERMISSIVE).disjointSets()) {
+       id_graphs_.idGraph(IdMappingMode::PERMISSIVE)
+           .disjointIdSets()
+           .disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");
@@ -3290,7 +3152,9 @@ void ComputeAtMap::buildConcreteIds() {
 
   // Same as exact computation
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdSets(IdMappingMode::ALMOSTEXACT).disjointSets()) {
+       id_graphs_.idGraph(IdMappingMode::ALMOSTEXACT)
+           .disjointIdSets()
+           .disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");
@@ -3300,7 +3164,9 @@ void ComputeAtMap::buildConcreteIds() {
   }
 
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
+       id_graphs_.idGraph(IdMappingMode::LOOP)
+           .disjointIdSets()
+           .disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");
@@ -3340,7 +3206,7 @@ std::string idGraphDisjointIdSetToString(
   std::stringstream ss;
   // Sort vectors before printing so that the resulting output is
   // printed deterministically
-  auto disjoint_sets = ca_map.idGraph().getDisjointIdSets(mode).disjointSets();
+  auto disjoint_sets = ca_map.idGraph(mode).disjointIdSets().disjointSets();
   std::sort(
       disjoint_sets.begin(),
       disjoint_sets.end(),
@@ -3379,7 +3245,7 @@ std::string idGraphDisjointIdSetToString(
 
 } // namespace
 
-// TODO: Deduplicate with IterDomainGraph::toString()
+// TODO: Deduplicate with IterDomainGraphs::toString()
 std::string ComputeAtMap::toString() const {
   std::stringstream ss;
   ss << "Compute at map { \n";
@@ -3396,8 +3262,8 @@ std::string ComputeAtMap::toString() const {
 }
 
 bool ComputeAtMap::isViewRfactor(IterDomain* ref_id) const {
-  return id_graph_.viewRfactorIds().find(ref_id) !=
-      id_graph_.viewRfactorIds().end();
+  return id_graphs_.viewRfactorIds().find(ref_id) !=
+      id_graphs_.viewRfactorIds().end();
 }
 
 std::vector<IterDomain*> ComputeAtMap::getViewRfactorDomainsOfIdGroup(
@@ -3406,8 +3272,8 @@ std::vector<IterDomain*> ComputeAtMap::getViewRfactorDomainsOfIdGroup(
   auto disjoint_set = disjointSetOf(ref_id, mode);
   std::vector<IterDomain*> rfactor_ids;
   for (auto disjoint_id : disjoint_set->vector()) {
-    if (id_graph_.viewRfactorIds().find(disjoint_id) !=
-        id_graph_.viewRfactorIds().end()) {
+    if (id_graphs_.viewRfactorIds().find(disjoint_id) !=
+        id_graphs_.viewRfactorIds().end()) {
       rfactor_ids.push_back(disjoint_id);
     }
   }
@@ -3416,7 +3282,7 @@ std::vector<IterDomain*> ComputeAtMap::getViewRfactorDomainsOfIdGroup(
 
 const IdGroup ComputeAtMap::disjointSetOf(IterDomain* id, IdMappingMode mode)
     const {
-  auto disjoint_set_pair = id_graph_.getDisjointIdSet(id, mode);
+  auto disjoint_set_pair = id_graphs_.idGraph(mode).disjointIdSet(id);
   TORCH_INTERNAL_ASSERT(
       disjoint_set_pair.second,
       id->toString(),
@@ -3440,8 +3306,8 @@ IdGroups ComputeAtMap::getInputDisjointSetsOf(
     if (!visited.emplace(currently_visiting).second) {
       continue;
     }
-    auto defs_pair = id_graph_.getIterDomainGroupDefinitions(
-        currently_visiting, IdMappingMode::EXACT);
+    auto defs_pair = id_graphs_.idGraph(IdMappingMode::EXACT)
+                         .iterDomainGroupDefinitions(currently_visiting);
 
     // If there's no definition, we've found an input.
     if (!defs_pair.second || defs_pair.first.empty()) {
@@ -3498,8 +3364,8 @@ IdGroups ComputeAtMap::getAllDisjointSetProducers(const IdGroups& exact_sets) {
     if (!visited.pushBack(currently_visiting)) {
       continue;
     }
-    auto defs_pair = id_graph_.getIterDomainGroupDefinitions(
-        currently_visiting, IdMappingMode::EXACT);
+    auto defs_pair = id_graphs_.idGraph(IdMappingMode::EXACT)
+                         .iterDomainGroupDefinitions(currently_visiting);
 
     if (!defs_pair.second) {
       continue;
@@ -3545,8 +3411,8 @@ IdGroups ComputeAtMap::getAllDisjointSetConsumers(const IdGroups& exact_sets) {
     if (!visited.pushBack(currently_visiting)) {
       continue;
     }
-    auto uses_pair = id_graph_.getIterDomainGroupUses(
-        currently_visiting, IdMappingMode::EXACT);
+    auto uses_pair = id_graphs_.idGraph(IdMappingMode::EXACT)
+                         .iterDomainGroupUses(currently_visiting);
 
     if (!uses_pair.second) {
       continue;
@@ -3579,7 +3445,7 @@ IdGroups ComputeAtMap::getAllDisjointSetConsumers(const IdGroups& exact_sets) {
   return visited;
 }
 
-void IterDomainGraph::updateComputeWith(TensorView* compute_with_tv) {
+void IterDomainGraphs::updateComputeWith(TensorView* compute_with_tv) {
   TORCH_INTERNAL_ASSERT(
       compute_with_tv->hasResolvedComputeWith(),
       "Invalid tensor: ",
@@ -3598,7 +3464,8 @@ void IterDomainGraph::updateComputeWith(TensorView* compute_with_tv) {
         consumer_tv->domain()->domain().begin(),
         consumer_tv->domain()->domain().end(),
         [&](auto consumer_id) {
-          return getDisjointIdSets(IdMappingMode::PERMISSIVE)
+          return idGraph(IdMappingMode::PERMISSIVE)
+              .disjointIdSets()
               .permissiveAreMapped(id, consumer_id);
         });
     TORCH_INTERNAL_ASSERT(
@@ -3610,7 +3477,7 @@ void IterDomainGraph::updateComputeWith(TensorView* compute_with_tv) {
 
     IterDomain* consumer_id = *it;
 
-    mapIds(id, consumer_id, IdMappingMode::LOOP);
+    idGraph(IdMappingMode::LOOP).mapIds(id, consumer_id);
   }
 }
 
@@ -3620,11 +3487,13 @@ void ComputeAtMap::updateComputeWith(TensorView* compute_with_tv) {
       "Invalid tensor: ",
       compute_with_tv->toString());
 
-  id_graph_.updateComputeWith(compute_with_tv);
+  id_graphs_.updateComputeWith(compute_with_tv);
 
   // Update the LOOP concrete IDs
   for (const auto& disjoint_set_shared_ptr :
-       id_graph_.getDisjointIdSets(IdMappingMode::LOOP).disjointSets()) {
+       id_graphs_.idGraph(IdMappingMode::LOOP)
+           .disjointIdSets()
+           .disjointSets()) {
     TORCH_INTERNAL_ASSERT(
         disjoint_set_shared_ptr->vector().size(),
         "Cannot compute concrete id of empty set.");

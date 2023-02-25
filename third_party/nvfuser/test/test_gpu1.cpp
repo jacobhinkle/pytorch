@@ -3108,14 +3108,14 @@ TEST_F(NVFuserTest, FusionDetectSelfMappedDomains_CUDA) {
   auto tv4 = add(tv2, tv3);
   fusion.addOutput(tv4);
 
-  // IterDomainGraph maps B2, I3 and I4 together, and similarly I2,
+  // IterDomainGraphs maps B2, I3 and I4 together, and similarly I2,
   // B3 and I5. The problem is I1 is mapped with both of the ID
   // groups, so eventually all of the IDs are mapped
-  // together. IterDomainGraph should throw an exception as this
+  // together. IterDomainGraphs should throw an exception as this
   // pattern of domain mappings is not supported.
 
   // NOLINTNEXTLINE(cppcoreguidelines-avoid-goto,hicpp-avoid-goto)
-  ASSERT_ANY_THROW({ IterDomainGraph id_graph(&fusion); });
+  ASSERT_ANY_THROW({ IterDomainGraphs id_graphs(&fusion); });
 }
 
 TEST_F(NVFuserTest, FusionScalarInputs_CUDA) {

@@ -77,43 +77,44 @@ std::string exprGroupStringShort(ExprGroup expr) {
 }
 
 std::string exprGroupStringShort(
-    const IterDomainGraph& id_graph,
+    const IterDomainGraphs& id_graphs,
     ExprGroup expr_group,
     IdMappingMode mode) {
   std::stringstream ss;
-  auto inputs = id_graph.inputGroups(expr_group, mode);
-  auto outputs = id_graph.outputGroups(expr_group, mode);
+  auto inputs = id_graphs.idGraph(mode).inputGroups(expr_group);
+  auto outputs = id_graphs.idGraph(mode).outputGroups(expr_group);
   ss << idGroupsStringShort(inputs) << " -" << exprGroupStringShort(expr_group)
      << "-> " << idGroupsStringShort(outputs);
   return ss.str();
 }
 
 std::string exprGroupsStringShort(
-    const IterDomainGraph& id_graph,
+    const IterDomainGraphs& id_graphs,
     ExprGroups expr_groups,
     IdMappingMode mode) {
   std::stringstream ss;
   ss << "{\n";
   for (auto expr_group : expr_groups) {
-    ss << "  " << exprGroupStringShort(id_graph, expr_group, mode) << "\n";
+    ss << "  " << exprGroupStringShort(id_graphs, expr_group, mode) << "\n";
   }
   ss << "}";
   return ss.str();
 }
 
 std::string definitionsToString(
-    const IterDomainGraph& id_graph,
+    const IterDomainGraphs& id_graphs,
     IdMappingMode mode) {
   std::stringstream ss;
   ss << "All index expr definitions in mode " << mode << ": " << std::endl;
 
-  for (auto id_group : id_graph.getDisjointIdSets(mode).disjointSets()) {
+  for (auto id_group :
+       id_graphs.idGraph(mode).disjointIdSets().disjointSets()) {
     auto definition_pair =
-        id_graph.getIterDomainGroupDefinitions(id_group, mode);
+        id_graphs.idGraph(mode).iterDomainGroupDefinitions(id_group);
     ss << idGroupStringShort(id_group) << std::endl;
     if (definition_pair.second) {
       for (auto expr_group : definition_pair.first) {
-        ss << "  " << exprGroupStringShort(id_graph, expr_group, mode)
+        ss << "  " << exprGroupStringShort(id_graphs, expr_group, mode)
            << std::endl;
       }
     }
@@ -121,16 +122,19 @@ std::string definitionsToString(
   return ss.str();
 }
 
-std::string usesToString(const IterDomainGraph& id_graph, IdMappingMode mode) {
+std::string usesToString(
+    const IterDomainGraphs& id_graphs,
+    IdMappingMode mode) {
   std::stringstream ss;
   ss << "All index expr uses in mode " << mode << ": " << std::endl;
 
-  for (auto id_group : id_graph.getDisjointIdSets(mode).disjointSets()) {
-    auto uses_pair = id_graph.getIterDomainGroupUses(id_group, mode);
+  for (auto id_group :
+       id_graphs.idGraph(mode).disjointIdSets().disjointSets()) {
+    auto uses_pair = id_graphs.idGraph(mode).iterDomainGroupUses(id_group);
     ss << idGroupStringShort(id_group) << std::endl;
     if (uses_pair.second) {
       for (auto expr_group : uses_pair.first) {
-        ss << "  " << exprGroupStringShort(id_graph, expr_group, mode)
+        ss << "  " << exprGroupStringShort(id_graphs, expr_group, mode)
            << std::endl;
       }
     }
@@ -147,16 +151,15 @@ IndexMap::IndexMap(
   IdGroups terminating_inputs;
   IdGroups terminating_outputs;
 
-  for (auto index_entry : ca_map_->idGraph()
-                              .getDisjointIdSets(IdMappingMode::INDEX)
-                              .disjointSets()) {
-    auto uses_pair = ca_map_->idGraph().getIterDomainGroupUses(
-        index_entry, IdMappingMode::INDEX);
+  for (auto index_entry :
+       ca_map_->idGraph(IdMappingMode::INDEX).disjointIdSets().disjointSets()) {
+    auto uses_pair =
+        ca_map_->idGraph(IdMappingMode::INDEX).iterDomainGroupUses(index_entry);
     bool non_trivial_use = false;
     if (uses_pair.second) {
       for (auto use : uses_pair.first) {
         auto first_expr = use->front();
-        if (IterDomainGraph::isTrivialExpr(first_expr).empty()) {
+        if (IdGraph::isTrivialExpr(first_expr).empty()) {
           non_trivial_use = true;
         }
       }
@@ -165,13 +168,13 @@ IndexMap::IndexMap(
       terminating_outputs.pushBack(index_entry);
     }
 
-    auto defs_pair = ca_map_->idGraph().getIterDomainGroupDefinitions(
-        index_entry, IdMappingMode::INDEX);
+    auto defs_pair = ca_map_->idGraph(IdMappingMode::INDEX)
+                         .iterDomainGroupDefinitions(index_entry);
     bool non_trivial_def = false;
     if (defs_pair.second) {
       for (auto def : defs_pair.first) {
         auto first_expr = def->front();
-        if (IterDomainGraph::isTrivialExpr(first_expr).empty()) {
+        if (IdGraph::isTrivialExpr(first_expr).empty()) {
           non_trivial_def = true;
         }
       }
@@ -192,35 +195,6 @@ IndexMap::IndexMap(
     zero_merged_in_[mem_type] = {};
   }
 
-  // kernel->as<Fusion>()->print();
-
-  // std::cout << "Loop map: " << std::endl;
-  // for (auto entry : ca_map_->idGraph()
-  //                       .getDisjointIdSets(IdMappingMode::LOOP)
-  //                       .disjointSets()) {
-  //   if (entry->size() > 1) {
-  //     std::cout << "  " << entry->toString() << std::endl;
-  //   }
-  // }
-
-  // std::cout << "Index map: " << std::endl;
-  // for (auto entry : ca_map_->idGraph()
-  //                       .getDisjointIdSets(IdMappingMode::INDEX)
-  //                       .disjointSets()) {
-  //   if (entry->size() > 1) {
-  //     std::cout << "  " << entry->toString() << std::endl;
-  //   }
-  // }
-
-  // std::cout << "Almost exact map: " << std::endl;
-  // for (auto entry : ca_map_->idGraph()
-  //                       .getDisjointIdSets(IdMappingMode::ALMOSTEXACT)
-  //                       .disjointSets()) {
-  //   if (entry->size() > 1) {
-  //     std::cout << "  " << entry->toString() << std::endl;
-  //   }
-  // }
-
   initializeIndices(terminating_outputs);
 
   std::cout << "Terminating inputs: " << std::endl;
@@ -233,79 +207,23 @@ IndexMap::IndexMap(
     std::cout << print_util2::idGroupStringShort(out) << std::endl;
   }
 
-  // std::cout << "All Exact exprs" << std::endl;
-  // for (auto expr_group : ca_map_->idGraph()
-  //                            .getDisjointExprSets(IdMappingMode::EXACT)
-  //                            .disjointSets()) {
-  //   std::cout << print_util2::exprGroupStringShort(
-  //                    ca_map_->idGraph(), expr_group, IdMappingMode::EXACT)
-  //             << std::endl;
-  // }
-  // std::cout << std::endl;
-
-  // std::cout << "All index exprs" << std::endl;
-  // for (auto expr_group : ca_map_->idGraph()
-  //                            .getDisjointExprSets(IdMappingMode::INDEX)
-  //                            .disjointSets()) {
-  //   std::cout << print_util2::exprGroupStringShort(
-  //                    ca_map_->idGraph(), expr_group, IdMappingMode::EXACT)
-  //             << std::endl;
-  // }
-  // std::cout << std::endl;
-
   auto all_uses =
-      ca_map_->idGraph().allUsesOf(terminating_inputs, IdMappingMode::INDEX);
+      ca_map_->idGraph(IdMappingMode::INDEX).allUsesOf(terminating_inputs);
 
-  auto all_definitions = ca_map_->idGraph().allDefinitionsOf(
-      terminating_outputs, IdMappingMode::INDEX);
+  auto all_definitions = ca_map_->idGraph(IdMappingMode::INDEX)
+                             .allDefinitionsOf(terminating_outputs);
 
   auto all_exprs = all_uses.intersect(all_definitions);
 
-  // std::cout << all_uses.size() << " intersect " << all_definitions.size()
-  //           << " = " << all_exprs.size() << std::endl;
-
-  // std::cout << "Intersection: " << std::endl;
-  // for (auto expr : all_exprs) {
-  //   std::cout << print_util2::exprGroupStringShort(
-  //                    ca_map_->idGraph(), expr, IdMappingMode::EXACT)
-  //             << std::endl;
-  // }
-  // std::cout << std::endl;
-
-  // std::cout << "u - d: " << std::endl;
-  // for (auto expr : all_uses.subtract(all_definitions)) {
-  //   std::cout << print_util2::exprGroupStringShort(
-  //                    ca_map_->idGraph(), expr, IdMappingMode::EXACT)
-  //             << std::endl;
-  // }
-  // std::cout << std::endl;
-
-  // std::cout << "d - u: " << std::endl;
-  // for (auto expr : all_definitions.subtract(all_uses)) {
-  //   std::cout << print_util2::exprGroupStringShort(
-  //                    ca_map_->idGraph(), expr, IdMappingMode::EXACT)
-  //             << std::endl;
-  // }
-  // std::cout << std::endl;
-
-  // std::cout << "Intersection: " << std::endl;
-  // for (auto expr : all_exprs) {
-  //   std::cout << print_util2::exprGroupStringShort(
-  //                    ca_map_->idGraph(), expr, IdMappingMode::EXACT)
-  //             << std::endl;
-  // }
-  // std::cout << std::endl;
-
   auto indexing_exprs =
-      ca_map_->idGraph()
-          .getExprsBetween(
-              terminating_inputs, terminating_outputs, IdMappingMode::INDEX)
+      ca_map_->idGraph(IdMappingMode::INDEX)
+          .getExprsBetween(terminating_inputs, terminating_outputs)
           .vector();
 
   std::cout << "Forward ordered expressions: " << std::endl;
   for (auto indexing_expr : indexing_exprs) {
     std::cout << print_util2::exprGroupStringShort(
-                     ca_map_->idGraph(), indexing_expr, IdMappingMode::EXACT)
+                     ca_map_->idGraphs(), indexing_expr, IdMappingMode::EXACT)
               << std::endl;
   }
 
@@ -314,7 +232,7 @@ IndexMap::IndexMap(
   std::cout << "Backward ordered expressions: " << std::endl;
   for (auto indexing_expr : indexing_exprs) {
     std::cout << print_util2::exprGroupStringShort(
-                     ca_map_->idGraph(), indexing_expr, IdMappingMode::EXACT)
+                     ca_map_->idGraphs(), indexing_expr, IdMappingMode::EXACT)
               << std::endl;
   }
   std::cout << std::endl;
@@ -394,7 +312,7 @@ void IndexMap::initializeIndices(IdGroups terminating_outputs) {
 
 IdGroup IndexMap::indexGroup(IterDomain* id) {
   auto index_group_pair =
-      ca_map_->idGraph().getDisjointIdSet(id, IdMappingMode::INDEX);
+      ca_map_->idGraph(IdMappingMode::INDEX).disjointIdSet(id);
   TORCH_INTERNAL_ASSERT(
       index_group_pair.second,
       "No index group for iter domain: ",
@@ -445,8 +363,8 @@ Val* IndexMap::getExtent(IdGroup index_group) {
 
   // Almost exact should be a superset of index group, use that for consistent
   // extents everywhere.
-  auto almost_exact_group_pair = ca_map_->idGraph().getDisjointIdSet(
-      index_group->front(), IdMappingMode::ALMOSTEXACT);
+  auto almost_exact_group_pair = ca_map_->idGraph(IdMappingMode::ALMOSTEXACT)
+                                     .disjointIdSet(index_group->front());
   TORCH_INTERNAL_ASSERT(
       almost_exact_group_pair.second,
       "Missing IdGraph entry for: ",
@@ -665,10 +583,12 @@ namespace {
 std::unordered_map<IterDomain*, IterDomain*> mapAllProducerDomainsToConsumer(
     const TensorView* producer_tv,
     const TensorView* consumer_tv) {
-  auto full_p2c_map = GpuLower::current()->caMap()->idGraph().buildMapBetween(
-      ir_utils::allIDsOf(producer_tv),
-      ir_utils::allIDsOf(consumer_tv),
-      IdMappingMode::PERMISSIVE);
+  auto full_p2c_map =
+      GpuLower::current()
+          ->caMap()
+          ->idGraph(IdMappingMode::PERMISSIVE)
+          .buildMapBetween(
+              ir_utils::allIDsOf(producer_tv), ir_utils::allIDsOf(consumer_tv));
 
   // Doesn't matter which consumer id we map to, just need to specify one if
   // multiple exist. This map is only checked based on permissive mapping.
@@ -904,12 +824,11 @@ bool predicateAtEnd(kir::ForLoop* loop) {
 
   // If the other output is mapped with a vectorized IterDomain,
   // this IterDomain needs to be predicated at each iteration point.
-  auto other_id_exact_set =
-      GpuLower::current()
-          ->caMap()
-          ->idGraph()
-          .getDisjointIdSet(other_out_id, IdMappingMode::EXACT)
-          .first;
+  auto other_id_exact_set = GpuLower::current()
+                                ->caMap()
+                                ->idGraph(IdMappingMode::EXACT)
+                                .disjointIdSet(other_out_id)
+                                .first;
 
   if (std::any_of(
           other_id_exact_set->vector().begin(),
@@ -1902,8 +1821,8 @@ bool isPermissivelyMappedWithAny(IterDomain* id, const std::vector<Val*>& ids) {
     return val->isA<IterDomain>() &&
         GpuLower::current()
             ->caMap()
-            ->idGraph()
-            .getDisjointIdSets(IdMappingMode::PERMISSIVE)
+            ->idGraph(IdMappingMode::PERMISSIVE)
+            .disjointIdSets()
             .permissiveAreMapped(id, val->as<IterDomain>());
   });
 }

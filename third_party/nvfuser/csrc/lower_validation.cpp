@@ -53,7 +53,7 @@ class ValidateSiblings : public IterVisitor {
       return;
     }
 
-    IterDomainGraph id_graph({expr});
+    IterDomainGraphs id_graphs({expr});
 
     for (const auto sibling : output_tvs) {
       if (ref_output == sibling) {
@@ -74,10 +74,10 @@ class ValidateSiblings : public IterVisitor {
       }
 
       for (const auto i : c10::irange(ref_ndims)) {
-        auto set_0_pair = id_graph.getDisjointIdSet(
-            ref_output->axis(i), IdMappingMode::EXACT);
-        auto set_1_pair =
-            id_graph.getDisjointIdSet(sibling->axis(i), IdMappingMode::EXACT);
+        auto set_0_pair = id_graphs.idGraph(IdMappingMode::EXACT)
+                              .disjointIdSet(ref_output->axis(i));
+        auto set_1_pair = id_graphs.idGraph(IdMappingMode::EXACT)
+                              .disjointIdSet(sibling->axis(i));
         TORCH_INTERNAL_ASSERT(
             set_0_pair.second && set_1_pair.second &&
                 set_0_pair.first == set_1_pair.first,
