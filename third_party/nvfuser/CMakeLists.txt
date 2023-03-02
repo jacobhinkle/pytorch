@@ -45,6 +45,7 @@ list(APPEND NVFUSER_SRCS
     ${NVFUSER_SRCS_DIR}/index_compute.cpp
     ${NVFUSER_SRCS_DIR}/lower_index_compute.cpp
     ${NVFUSER_SRCS_DIR}/instrumentation.cpp
+    ${NVFUSER_SRCS_DIR}/id_e_graph.cpp
     ${NVFUSER_SRCS_DIR}/ir_base_nodes.cpp
     ${NVFUSER_SRCS_DIR}/ir_builder.cpp
     ${NVFUSER_SRCS_DIR}/ir_cloner.cpp
@@ -329,6 +330,7 @@ if(BUILD_TEST)
   list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_view.cpp)
   list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_transpose.cpp)
   list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_utils.cpp)
+  list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_id_e_graph.cpp)
   list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_indexing_ops.cpp)
   list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_indexing.cpp)
   list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_gather_ops.cpp)
