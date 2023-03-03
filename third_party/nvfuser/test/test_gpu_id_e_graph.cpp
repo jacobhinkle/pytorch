@@ -5,11 +5,11 @@
 #include <arith.h>
 #include <compute_at_map.h>
 #include <executor.h>
+#include <id_e_graph.h>
 #include <inlining.h>
 #include <ir_all_nodes.h>
 #include <ir_builder.h>
 #include <scheduler/all_schedulers.h>
-#include <id_e_graph.h>
 
 #include <test/cpp/jit/test_utils.h>
 #include <test/test_gpu_validator.h>
@@ -23,13 +23,12 @@ namespace jit {
 
 using namespace torch::jit::fuser::cuda;
 
-
 // Play with forming equivalence classes of IterDomains
 TEST_F(NVFuserTest, FusionIDEGraph) {
   Fusion fusion;
   FusionGuard fg(&fusion);
   // [w]
-  //auto tv0 = makeSymbolicTensor(1);
+  // auto tv0 = makeSymbolicTensor(1);
   auto tv0 = makeConcreteTensor({5});
   fusion.addInput(tv0);
 
@@ -61,7 +60,7 @@ TEST_F(NVFuserTest, FusionIDEGraph) {
   fusion.addOutput(tv9);
 
   fusion.printMath();
-  //fusion.print();
+  // fusion.print();
 
   IterDomainEGraph eg(fusion);
 }
