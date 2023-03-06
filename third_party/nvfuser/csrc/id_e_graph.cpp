@@ -46,9 +46,8 @@ void IterDomainEGraph::initGraph() {
         }
         auto idin = indom[j++];
         auto idout = outdom[i];
-        id_partition_->merge_sets_from_values(idin, idout);
-        extent_partition_->merge_sets_from_values(
-            idin->extent(), idout->extent());
+        id_partition_->mergeSetsFromValues(idin, idout);
+        extent_partition_->mergeSetsFromValues(idin->extent(), idout->extent());
       }
     } else if (expr->isA<ReductionOp>()) {
       std::cout << "Reduction op: " << expr->toString() << std::endl;
@@ -65,15 +64,16 @@ void IterDomainEGraph::initGraph() {
         if (idout->isReduction()) {
           // Don't merge serial input with rdomain output
           // TODO: set REDUCES relation
+          id_relations_.push_back(Relation(RelationType::Reduces, idin, idout));
           continue;
         }
         if (idin->isBroadcast()) {
-          // TODO: set RESOLVES relation
+          id_relations_.push_back(
+              Relation(RelationType::ResolvesBroadcast, idin, idout));
           continue;
         }
-        id_partition_->merge_sets_from_values(idin, idout);
-        extent_partition_->merge_sets_from_values(
-            idin->extent(), idout->extent());
+        id_partition_->mergeSetsFromValues(idin, idout);
+        extent_partition_->mergeSetsFromValues(idin->extent(), idout->extent());
       }
     } else if (expr->isA<TransposeOp>()) {
       auto top = reinterpret_cast<TransposeOp*>(expr);
@@ -86,9 +86,8 @@ void IterDomainEGraph::initGraph() {
         auto oldi = n2o[i];
         auto idin = indom[oldi];
         auto idout = outdom[i];
-        id_partition_->merge_sets_from_values(idin, idout);
-        extent_partition_->merge_sets_from_values(
-            idin->extent(), idout->extent());
+        id_partition_->mergeSetsFromValues(idin, idout);
+        extent_partition_->mergeSetsFromValues(idin->extent(), idout->extent());
       }
     } else if (expr->isA<ViewOp>()) {
       std::cout << "Skipping reshape op: " << expr->toString() << std::endl;
@@ -156,12 +155,13 @@ void IterDomainEGraph::initGraph() {
             TORCH_CHECK(
                 !(*idout)->isBroadcast(),
                 "Output IterDomains of pointwise ops should not be of broadcast type");
-            // TODO: check for broadcast IDs in input
             if ((*idin)->isBroadcast()) {
+              id_relations_.push_back(
+                  Relation(RelationType::ResolvesBroadcast, *idin, *idout));
               continue;
             }
-            id_partition_->merge_sets_from_values(*idin, *idout);
-            extent_partition_->merge_sets_from_values(
+            id_partition_->mergeSetsFromValues(*idin, *idout);
+            extent_partition_->mergeSetsFromValues(
                 (*idin)->extent(), (*idout)->extent());
           }
         }
@@ -169,7 +169,7 @@ void IterDomainEGraph::initGraph() {
     }
   }
   std::cout << "Equivalence classes of IterDomains:" << std::endl;
-  for (auto s : id_partition_->get_sets()) {
+  for (auto s : id_partition_->getSets()) {
     std::cout << "  ";
     for (auto id : s) {
       std::cout << id->toString() << ", ";
@@ -177,7 +177,7 @@ void IterDomainEGraph::initGraph() {
     std::cout << std::endl;
   }
   std::cout << "Equivalence classes of extents:" << std::endl;
-  for (auto s : extent_partition_->get_sets()) {
+  for (auto s : extent_partition_->getSets()) {
     std::cout << "  ";
     for (auto e : s) {
       std::cout << e->toString() << ", ";
@@ -225,20 +225,24 @@ void IterDomainEGraph::printDot(std::ostream& stream) {
     auto tv = reinterpret_cast<TensorView*>(in_val);
     auto i = 0;
     for (auto id : tv->domain()->domain()) {
-      auto c = id_partition_->find_set_from_value(id);
+      auto c = id_partition_->findSetFromValue(id);
       stream << "  T" << tv->name() << ":id" << i++ << " -> ";
       stream << "c" << c << ";" << std::endl;
     };
   }
 
-  /*
-  // Print all relations between classes
-  for (auto r: getClassRelations()) {
-    (void)r; // TODO REMOVE
-    // Place a labeled edge for every relation between ID classes
-
+  for (auto c : id_partition_.get()->getSetIndices()) {
+    stream << "  c" << c << ";" << std::endl;
   }
-  */
+
+  // Print all relations between classes
+  for (auto r : id_relations_) {
+    auto left_class = id_partition_->findSetFromValue(r.getLeft());
+    auto right_class = id_partition_->findSetFromValue(r.getRight());
+    // Place a labeled edge for every relation between ID classes
+    stream << "  c" << left_class << " -> c" << right_class;
+    stream << " [label=\"" << r.typeString() << "\"];" << std::endl;
+  }
 
   // Place edges from classes to outputs
   for (auto out_val : fusion_.outputs()) {
@@ -248,7 +252,7 @@ void IterDomainEGraph::printDot(std::ostream& stream) {
     auto tv = reinterpret_cast<TensorView*>(out_val);
     auto i = 0;
     for (auto id : tv->domain()->domain()) {
-      auto c = id_partition_->find_set_from_value(id);
+      auto c = id_partition_->findSetFromValue(id);
       stream << "  c" << c << " -> T";
       stream << tv->name() << ":id" << i++ << ";" << std::endl;
     };
@@ -273,8 +277,8 @@ void IterDomainEGraph::printDot(std::ostream& stream) {
       if (!first) {
         stream << "|"; // separator
       }
-      stream << "<id" << i << "> " << id->getIterType() << id->getParallelType()
-             << id->name();
+      stream << "<id" << i++ << "> " << id->getIterType()
+             << id->getParallelType() << id->name();
       first = false;
     };
     stream << "}|T" << tv->name() << "}\"];" << std::endl;
