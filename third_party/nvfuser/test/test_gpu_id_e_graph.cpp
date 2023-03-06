@@ -9,6 +9,7 @@
 #include <inlining.h>
 #include <ir_all_nodes.h>
 #include <ir_builder.h>
+#include <ops/alias.h>
 #include <scheduler/all_schedulers.h>
 
 #include <test/cpp/jit/test_utils.h>
@@ -65,6 +66,71 @@ TEST_F(NVFuserTest, FusionIDEGraph) {
   IterDomainEGraph eg(fusion);
 
   eg.printDot();
+}
+
+// Simple reshape example
+TEST_F(NVFuserTest, FusionReshapeIDGraph) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeConcreteTensor({2, 3, 5, 12});
+  fusion.addInput(tv0);
+
+  auto tv1 = view(tv0, {2, 3, 5, 12}, {6, 5, 4, 3});
+
+  fusion.addOutput(tv1);
+
+  fusion.printMath();
+  // fusion.print();
+
+  IterDomainEGraph eg(fusion);
+
+  eg.printDot();
+}
+
+// Gram matrix (inner product matrix) example
+TEST_F(NVFuserTest, FusionGramMatrixIdGraph) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  // [n, d]
+  auto tv0 = makeConcreteTensor({5, 7});
+  fusion.addInput(tv0);
+
+  // [1, n, d]
+  auto tv1 = broadcast(tv0, {true, false, false});
+  // [n, 1, d]
+  auto tv2 = broadcast(tv0, {false, true, false});
+
+  // [n, n, d]
+  auto tv3 = mul(tv1, tv2);
+
+  // [n, n]
+  auto tv4 = sum(tv3, {2});
+
+  fusion.addOutput(tv4);
+
+  fusion.printMath();
+  // fusion.print();
+
+  IterDomainEGraph eg(fusion);
+
+  eg.printDot();
+
+  const auto options =
+      at::TensorOptions().dtype(at::kFloat).device(at::kCUDA, 0);
+  at::Tensor aten_input = at::randn({5, 7}, options);
+
+  auto reduction_params = getReductionHeuristics(&fusion, {aten_input});
+  TORCH_CHECK(reduction_params, "Reduction schedule was not generated!");
+  scheduleReduction(&fusion, *reduction_params);
+
+  auto lparams = reduction_params->lparams;
+
+  FusionExecutor fe;
+  fe.compileFusion(&fusion, {aten_input}, lparams);
+  // no broadcasting needed, omitting the last optional argument;
+  auto cg_outputs = fe.runFusion({aten_input}, lparams);
 }
 
 } // namespace jit
