@@ -68,6 +68,29 @@ TEST_F(NVFuserTest, FusionIDEGraph) {
   eg.printDot();
 }
 
+// Very simple graph with a broadcast and no reductions
+TEST_F(NVFuserTest, FusionSimpleMulIDGraph) {
+  Fusion fusion;
+  FusionGuard fg(&fusion);
+
+  auto tv0 = makeConcreteTensor({2, 3});
+  fusion.addInput(tv0);
+  auto tv1 = makeConcreteTensor({2});
+  fusion.addInput(tv1);
+
+  auto tv2 = broadcast(tv1, {false, true});
+  auto tv3 = mul(tv0, tv2);
+
+  fusion.addOutput(tv3);
+
+  fusion.printMath();
+  // fusion.print();
+
+  IterDomainEGraph eg(fusion);
+
+  eg.printDot();
+}
+
 // Simple reshape example
 TEST_F(NVFuserTest, FusionReshapeIDGraph) {
   Fusion fusion;
