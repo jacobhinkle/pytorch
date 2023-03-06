@@ -40,22 +40,6 @@ class Relation {
   T left_id_, right_id_;
 };
 
-//! Left domain is inner to right domain in at least one input TensorView
-template <typename T>
-class InnerToInInputRelation : Relation<T> {
-  RelationType type() const {
-    return RelationType::InnerToInInput;
-  }
-};
-
-//! Left domain is inner to right domain in at least one output TensorView
-template <typename T>
-class InnerToInOutputRelation : Relation<T> {
-  RelationType type() const {
-    return RelationType::InnerToInOutput;
-  }
-};
-
 //! Left domain resolves the right (broadcast) domain
 template <typename T>
 class ResolvesBroadcastRelation : Relation<T> {
@@ -75,7 +59,11 @@ class ReducesRelation : Relation<T> {
 //! Implements an E-graph whose "terms" are IterDomains.
 class TORCH_CUDA_CU_API IterDomainEGraph {
  public:
-  IterDomainEGraph(const Fusion& fusion);
+  IterDomainEGraph(Fusion& fusion) : fusion_(fusion) {
+    initGraph();
+  };
+
+  void initGraph();
 
   //! Get all class IDs, which are not guaranteed to be a contiguous list of
   //! size_t's
@@ -84,15 +72,11 @@ class TORCH_CUDA_CU_API IterDomainEGraph {
   //! Convert internal representation to relations over _classes_
   std::vector<Relation<size_t>*> getClassRelations();
 
-  //! Print out a diagram in mermaid format
-  //! https://mermaid.js.org
-  //! https://mermaid.live
-  void printMermaid(std::ostream& stream) {
-    stream << "graph TD" << std::endl;
-  }
+  //! Print out a diagram as a hierarchical graph in GraphViz's .dot format
+  void printDot(std::ostream& stream = std::cout);
 
  private:
-  Fusion* fusion;
+  Fusion& fusion_;
   std::vector<int> e_class_ids_;
   std::vector<Relation<IterDomain*>*> id_relations_;
   std::vector<IterDomain*> all_ids_;

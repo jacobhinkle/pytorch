@@ -9,10 +9,10 @@ namespace jit {
 namespace fuser {
 namespace cuda {
 
-IterDomainEGraph::IterDomainEGraph(const Fusion& fusion) {
+void IterDomainEGraph::initGraph() {
   // Initialize a partition of all IterDomains in the Fusion, initially
   // containing all singleton classes.
-  for (auto v : fusion.vals()) {
+  for (auto v : fusion_.vals()) {
     if (v->getValType() == ValType::IterDomain) {
       auto id = reinterpret_cast<IterDomain*>(v);
       all_ids_.push_back(id);
@@ -24,7 +24,7 @@ IterDomainEGraph::IterDomainEGraph(const Fusion& fusion) {
   extent_partition_ =
       std::unique_ptr<UnionFind<Val*>>(new UnionFind(all_extents_));
 
-  for (auto expr : fusion.unordered_exprs()) {
+  for (auto expr : fusion_.unordered_exprs()) {
     // Expressions fall into one of the following categories:
     //   Broadcast
     //   Reduction
@@ -184,6 +184,106 @@ IterDomainEGraph::IterDomainEGraph(const Fusion& fusion) {
     }
     std::cout << std::endl;
   }
+}
+
+//! Print out a diagram in GraphViz's .dot format
+void IterDomainEGraph::printDot(std::ostream& stream) {
+  stream << "digraph id_graph {" << std::endl;
+  // print inputs
+  stream << "  { rank = source;" << std::endl;
+  // Each input tensor is printed with a partitioned box indicating the ID
+  // name (not the class label), and edges are drawn from those to their
+  // associated classes.
+  for (auto in_val : fusion_.inputs()) {
+    if (in_val->getValType() != ValType::TensorView) {
+      continue;
+    }
+    auto tv = reinterpret_cast<TensorView*>(in_val);
+    // Example line
+    //   T0 [shape=record,label=""];
+    stream << "    T" << tv->name() << " [shape=record, label=\"{T"
+           << tv->name() << "|{";
+    bool first = true;
+    int i = 0;
+    for (auto id : tv->domain()->domain()) {
+      if (!first) {
+        stream << "|"; // separator
+      }
+      stream << "<id" << i++ << "> " << id->getIterType()
+             << id->getParallelType() << id->name();
+      first = false;
+    };
+    stream << "}}\"];" << std::endl;
+  }
+  stream << "  }" << std::endl; // rank = min
+
+  // Place edges from inputs to classes
+  for (auto in_val : fusion_.inputs()) {
+    if (in_val->getValType() != ValType::TensorView) {
+      continue;
+    }
+    auto tv = reinterpret_cast<TensorView*>(in_val);
+    auto i = 0;
+    for (auto id : tv->domain()->domain()) {
+      auto c = id_partition_->find_set_from_value(id);
+      stream << "  T" << tv->name() << ":id" << i++ << " -> ";
+      stream << "c" << c << ";" << std::endl;
+    };
+  }
+
+  /*
+  // Print all relations between classes
+  for (auto r: getClassRelations()) {
+    (void)r; // TODO REMOVE
+    // Place a labeled edge for every relation between ID classes
+
+  }
+  */
+
+  // Place edges from classes to outputs
+  for (auto out_val : fusion_.outputs()) {
+    if (out_val->getValType() != ValType::TensorView) {
+      continue;
+    }
+    auto tv = reinterpret_cast<TensorView*>(out_val);
+    auto i = 0;
+    for (auto id : tv->domain()->domain()) {
+      auto c = id_partition_->find_set_from_value(id);
+      stream << "  c" << c << " -> T";
+      stream << tv->name() << ":id" << i++ << ";" << std::endl;
+    };
+  }
+
+  // print outputs
+  stream << "  { rank = max;" << std::endl;
+  // Each output tensor is printed with a partitioned box indicating the ID
+  // name (not the class label) ON TOP, and edges are drawn to those from
+  // their associated classes.
+  for (auto out_val : fusion_.outputs()) {
+    if (out_val->getValType() != ValType::TensorView) {
+      continue;
+    }
+    auto tv = reinterpret_cast<TensorView*>(out_val);
+    // Example line
+    //   T0 [shape=record,label=""];
+    stream << "    T" << tv->name() << " [shape=record, label=\"{{";
+    bool first = true;
+    int i = 0;
+    for (auto id : tv->domain()->domain()) {
+      if (!first) {
+        stream << "|"; // separator
+      }
+      stream << "<id" << i << "> " << id->getIterType() << id->getParallelType()
+             << id->name();
+      first = false;
+    };
+    stream << "}|T" << tv->name() << "}\"];" << std::endl;
+  }
+  stream << "  }" << std::endl; // rank = max
+
+  // Add edges for relations
+
+  stream << "}" << std::endl; // digraph id_graph {
 }
 
 } // namespace cuda
