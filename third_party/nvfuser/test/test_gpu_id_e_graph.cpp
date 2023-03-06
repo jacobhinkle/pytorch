@@ -63,6 +63,8 @@ TEST_F(NVFuserTest, FusionIDEGraph) {
   // fusion.print();
 
   IterDomainEGraph eg(fusion);
+
+  eg.printDot();
 }
 
 } // namespace jit
