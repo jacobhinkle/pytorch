@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -28,22 +29,22 @@ class UnionFind {
 
   UnionFind(std::vector<T> vals) : UnionFind(vals.size()) {
     for (size_t i = 0; i < vals.size(); ++i) {
-      this->set_value(i, vals[i]);
+      this->setValue(i, vals[i]);
     }
   }
 
   UnionFind(std::unordered_set<T> vals) : UnionFind(vals.size()) {
     size_t i = 0;
     for (auto v : vals) {
-      this->set_value(i++, v);
+      this->setValue(i++, v);
     }
   }
 
-  void set_value(int pos, const T& val) {
+  void setValue(int pos, const T& val) {
     value_[pos] = val;
     val_to_pos_[val] = pos;
   }
-  T get_value(int pos) {
+  T getValue(int pos) {
     TORCH_CHECK(
         pos < value_.size(),
         "Passed invalid position ",
@@ -55,7 +56,7 @@ class UnionFind {
   }
 
   //! Insert the given value and return the new number of elements
-  size_t insert_value(const T& val) {
+  size_t insertValue(const T& val) {
     auto pos = parent_.size();
     parent_.push_back(pos);
     size_.push_back(1);
@@ -65,28 +66,28 @@ class UnionFind {
   }
 
   //! Find the integer position of val
-  size_t get_position(const T& val) {
+  size_t getPosition(const T& val) {
     return val_to_pos_.at(val);
   }
 
   //! Get the integer index of the set from given position
-  size_t find_set(size_t v) {
+  size_t findSet(size_t v) {
     if (v == parent_[v])
       return v;
     // Note that this step actually updates the tree to point directly to the
     // root index, meaning subsequent look-ups will not need to recurse.
-    return parent_[v] = find_set(parent_[v]);
+    return parent_[v] = findSet(parent_[v]);
   }
   //! Get the integer index of the set for a given value
-  size_t find_set_from_value(T val) {
-    return find_set(get_position(val));
+  size_t findSetFromValue(T val) {
+    return findSet(getPosition(val));
   }
 
   //! Get all elements in the set with given index (up to O(n^2))
-  std::vector<T> get_set(size_t idx) {
+  std::vector<T> getSet(size_t idx) {
     std::vector<T> s;
     for (size_t i = 0; i < parent_.size(); ++i) {
-      if (find_set(i) == idx) {
+      if (findSet(i) == idx) {
         s.push_back(value_.at(i));
       }
     }
@@ -94,10 +95,10 @@ class UnionFind {
   }
 
   //! Get a vector of all sets of values
-  std::vector<std::vector<T>> get_sets() {
+  std::vector<std::vector<T>> getSets() {
     std::vector<std::vector<T>> out;
     for (size_t i = 0; i < parent_.size(); ++i) {
-      auto s = get_set(i);
+      auto s = getSet(i);
       if (s.size() > 0) {
         out.push_back(s);
       }
@@ -105,8 +106,19 @@ class UnionFind {
     return out;
   }
 
+  //! Get a vector of set indexes
+  std::vector<size_t> getSetIndices() {
+    std::vector<size_t> ids;
+    for (size_t i = 0; i < parent_.size(); ++i) {
+      if (parent_[i] == i) {
+        ids.push_back(i);
+      }
+    }
+    return ids;
+  }
+
   //! Merge two sets in the partition
-  void merge_sets(size_t a, size_t b) {
+  void mergeSets(size_t a, size_t b) {
     if (a != b) {
       if (size_[a] < size_[b])
         std::swap(a, b);
@@ -115,10 +127,10 @@ class UnionFind {
     }
   }
   //! Merge the sets containing two given values
-  void merge_sets_from_values(T val_a, T val_b) {
-    auto a = find_set(get_position(val_a));
-    auto b = find_set(get_position(val_b));
-    merge_sets(a, b);
+  void mergeSetsFromValues(T val_a, T val_b) {
+    auto a = findSet(getPosition(val_a));
+    auto b = findSet(getPosition(val_b));
+    mergeSets(a, b);
   }
 
  private:
