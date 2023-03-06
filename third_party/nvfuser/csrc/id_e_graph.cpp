@@ -170,7 +170,8 @@ void IterDomainEGraph::initGraph() {
   }
   std::cout << "Equivalence classes of IterDomains:" << std::endl;
   for (auto s : id_partition_->getSets()) {
-    std::cout << "  ";
+    std::cout << "  c";
+    std::cout << id_partition_->findSetFromValue(s[0]) << ": ";
     for (auto id : s) {
       std::cout << id->toString() << ", ";
     }
@@ -178,7 +179,8 @@ void IterDomainEGraph::initGraph() {
   }
   std::cout << "Equivalence classes of extents:" << std::endl;
   for (auto s : extent_partition_->getSets()) {
-    std::cout << "  ";
+    std::cout << "  e";
+    std::cout << extent_partition_->findSetFromValue(s[0]) << ": ";
     for (auto e : s) {
       std::cout << e->toString() << ", ";
     }
