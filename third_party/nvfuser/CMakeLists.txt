@@ -360,6 +360,7 @@ if(BUILD_TEST)
   list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_gather_ops.cpp)
   list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_multidevice.cpp)
   list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_multicluster_fusion.cpp)
+  list(APPEND JIT_TEST_SRCS ${NVFUSER_ROOT}/test/test_gpu_models.cpp)
 
   set(JIT_TEST_CU_SRCS)
   list(APPEND JIT_TEST_CU_SRCS ${NVFUSER_ROOT}/test/test_gpu_rng.cu)
