@@ -73,16 +73,27 @@ TensorView* view(TensorView* x, DataType dtype) {
   TORCH_INTERNAL_ASSERT(false, "Unsupported reinterpret casting view");
 }
 
-TensorView* reshape(
-    TensorView* x,
-    const std::vector<int64_t>& original_sizes,
-    const std::vector<int64_t>& new_sizes) {
+TensorView* reshape(TensorView* x, const std::vector<Val*>& new_sizes) {
   TORCH_INTERNAL_ASSERT(x != nullptr, "Input is invalid.");
   TORCH_INTERNAL_ASSERT(
       TensorDomain::noReductions(x->getMaybeRFactorDomain()).size() ==
       original_sizes.size());
 
-  auto view_analysis = analyzeView(x, original_sizes, new_sizes);
+  std::vector<Val*> input_size_vals;
+  input_size_vals.reserve(x->nDims());
+  for (size_t i = 0; i < x->nDims(); ++i) {
+    input_size_vals.push_back(x->axis(i)->extent());
+  }
+  auto view_analysis = analyzeView(x, input_size_vals, new_sizes);
+
+  // Insert assertions and recompile checks found during view analysis
+  auto fusion = FusionGuard::getCurFusion();
+  for (auto p : view_analysis.assertions) {
+    fusion->insertAssertion(p);
+  }
+  for (auto p : view_analysis.validity_checks) {
+    fusion->insertRecompileCondition(notOp(p));
+  }
 
   auto squeezed = std::any_of(
                       view_analysis.squeeze_axes.begin(),
@@ -103,6 +114,18 @@ TensorView* reshape(
       : view;
 
   return bcasted;
+}
+
+TensorView* reshape(
+    TensorView* x,
+    const std::vector<int64_t>& original_sizes,
+    const std::vector<int64_t>& new_sizes) {
+  std::vector<Val*> new_size_vals;
+  new_size_vals.reserve(new_sizes.size());
+  for (auto s : new_sizes) {
+    new_size_vals.emplace_back(IrBuilder::create<Int>(s));
+  }
+  return reshape(x, new_size_vals);
 }
 
 TensorView* flatten(TensorView* x, int64_t start_dim, int64_t end_dim) {

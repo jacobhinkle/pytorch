@@ -8,6 +8,7 @@
 #include <ir_base_nodes.h>
 #include <ir_container.h>
 #include <iter_visitor.h>
+#include <predicate_checker.h>
 
 #include <unordered_map>
 #include <unordered_set>
@@ -252,6 +253,17 @@ class TORCH_CUDA_CU_API Fusion : public IrContainer {
     loop_rotation_param_.emplace_back(loop_tv, axis, std::move(selection));
   }
 
+  //! Add a predicate that must be true for any inputs
+  void insertAssertion(Bool* predicate) {
+    assertion_checker_.insert(predicate);
+  }
+
+  //! Add a predicate that, if true, would require a recompilation of this
+  //! Fusion
+  void insertRecompileCondition(Bool* predicate) {
+    recompile_checker_.insert(predicate);
+  }
+
  protected:
   friend SegmentCandidateFinder;
   friend SegmentedFusion;
@@ -306,6 +318,13 @@ class TORCH_CUDA_CU_API Fusion : public IrContainer {
   // Compilation parameters guiding the loop rotation pass. See note
   // [Loop Rotation] for detail.
   LoopRotationParam loop_rotation_param_;
+
+  // Checks assertions on inputs that are implied by the structure of the Fusion
+  PredicateChecker assertion_checker_;
+
+  // Checks conditions that would disqualify reuse of this Fusion with different
+  // inputs
+  PredicateChecker recompile_checker_;
 };
 
 } // namespace nvfuser

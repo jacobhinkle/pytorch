@@ -34,6 +34,13 @@ struct AnalyzeViewResult {
   std::vector<bool> broadcast_axes;
   std::vector<bool> squeeze_axes;
   std::vector<std::shared_ptr<ViewTransform>> transforms;
+
+  //! All of these must pass for any input shapes
+  std::vector<Val*> assertions;
+
+  //! If all of these predicates return true, then this Result can be re-used
+  //! with different input shapes
+  std::vector<Val*> validity_checks;
 };
 
 struct TORCH_CUDA_CU_API AnalyzeViewConstraint {

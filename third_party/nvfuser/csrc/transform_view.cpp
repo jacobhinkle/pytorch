@@ -727,7 +727,7 @@ AnalyzeViewResult analyzeView(
             new_sizes.end(),
             [](int64_t s) { return s == 1; }),
         "Zero-dim tensors may only be reshaped to tensors with a single element (no expansion).");
-    return {std::vector<bool>(new_sizes.size(), true), {}, {}};
+    return {std::vector<bool>(new_sizes.size(), true), {}, {}, {}, {}};
   }
 
   TORCH_INTERNAL_ASSERT(
