@@ -2396,6 +2396,52 @@ void initNvFuserPythonBindings(PyObject* module) {
       py::arg("dim"),
       py::return_value_policy::reference);
   nvf_ops.def(
+      "pad",
+      [](FusionDefinition::Operators& self,
+         Tensor arg,
+         std::vector<Scalar>& pad_widths) -> Tensor {
+        FUSER_PERF_SCOPE("Operators.pad");
+        TORCH_CHECK(
+            self.validUse(), "Attempting to add to a completed definition!");
+        FusionDefinition* fd = self.fusion_definition;
+        Tensor output = fd->defineTensor(arg.dims);
+        std::vector<State> pad_width_states;
+        pad_width_states.reserve(pad_widths.size());
+        for (auto p : pad_widths) {
+          pad_width_states.push_back(fd->recordingState(p()));
+        }
+        fd->defineRecord(new PadOpRecord(
+            {fd->recordingState(arg())},
+            {fd->recordingState(output())},
+            pad_width_states));
+        return output;
+      },
+      py::arg("arg"),
+      py::arg("pad_widths"),
+      py::return_value_policy::reference);
+  tensor_class.def(
+      "pad",
+      [](Tensor arg, std::vector<Scalar>& pad_widths) -> Tensor {
+        FUSER_PERF_SCOPE("Operators.pad");
+        TORCH_CHECK(
+            self.validUse(), "Attempting to add to a completed definition!");
+        FusionDefinition* fd = arg.fusion_definition;
+        Tensor output = fd->defineTensor(arg.dims);
+        std::vector<State> pad_width_states;
+        pad_width_states.reserve(pad_widths.size());
+        for (auto p : pad_widths) {
+          pad_width_states.push_back(fd->recordingState(p()));
+        }
+        fd->defineRecord(new PadOpRecord(
+            {fd->recordingState(arg())},
+            {fd->recordingState(output())},
+            pad_width_states));
+        return output;
+      },
+      py::arg("arg"),
+      py::arg("pad_widths"),
+      py::return_value_policy::reference);
+  nvf_ops.def(
       "permute",
       [](FusionDefinition::Operators& self,
          Tensor arg,
